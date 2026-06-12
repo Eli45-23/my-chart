@@ -92,6 +92,21 @@
       border-color: #8ab4f8;
       color: #ffffff;
     }
+    .toggle-btn.clean-mode-suppressed {
+      opacity: 0.45;
+    }
+    .clean-mode-btn {
+      background: #203d32;
+      border-color: #58c98b;
+      color: #ffffff;
+      font-weight: 700;
+      margin-right: 6px;
+    }
+    .clean-mode-btn:not(.active) {
+      background: #1b2230;
+      border-color: #2d3545;
+      color: #d6d9df;
+    }
 </style>
 </head>
 <body>
@@ -112,6 +127,7 @@
 
 
   <div class="toggle-row">
+    <button class="toggle-btn clean-mode-btn active" id="cleanModeToggle" type="button" aria-pressed="true">Clean Mode: On</button>
     <span class="toggle-label">Layers:</span>
     <button class="toggle-btn active" data-layer="premarket">PMH/PML</button>
     <button class="toggle-btn active" data-layer="previousDay">PDH/PDL/PDC</button>
@@ -130,6 +146,6 @@
   <div class="legend" id="legend"></div>
   <div class="error" id="error"></div>
 
-  <script src="/app_stream.js?v=stream18"></script>
+  <script src="/app_stream.js?v=stream19"></script>
 </body>
 </html>

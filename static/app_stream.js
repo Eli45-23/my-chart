@@ -5,7 +5,18 @@ const errorEl = document.getElementById("error");
 const countdownEl = document.getElementById("countdown");
 const streamStatusEl = document.getElementById("streamStatus");
 const tfButtons = document.querySelectorAll(".tf-btn");
-const toggleButtons = document.querySelectorAll(".toggle-btn");
+const toggleButtons = document.querySelectorAll(".toggle-btn[data-layer]");
+const cleanModeToggle = document.getElementById("cleanModeToggle");
+
+const CLEAN_MODE_STORAGE_KEY = "aaplChartCleanMode";
+let cleanMode = true;
+
+try {
+  const savedCleanMode = localStorage.getItem(CLEAN_MODE_STORAGE_KEY);
+  cleanMode = savedCleanMode === null ? true : savedCleanMode === "true";
+} catch (_) {
+  cleanMode = true;
+}
 
 const layerState = {
   premarket: true,
@@ -118,10 +129,36 @@ const ema20Series = chart.addLineSeries({
 
 let priceLines = [];
 
+function isLayerVisible(layer) {
+  const cleanModeHiddenLayers = ["sr", "liquiditySweeps", "clusters", "reactionZones"];
+  return layerState[layer] && !(cleanMode && cleanModeHiddenLayers.includes(layer));
+}
+
+function isWeakZone(zone) {
+  return (zone?.label || "").includes("Weak Zone");
+}
+
+function chartSupplyDemandZones(zones) {
+  return (zones || []).filter(zone => !(isWeakZone(zone) && (cleanMode || !layerState.weakZones)));
+}
+
+function updateCleanModeControl() {
+  cleanModeToggle.classList.toggle("active", cleanMode);
+  cleanModeToggle.setAttribute("aria-pressed", String(cleanMode));
+  cleanModeToggle.textContent = `Clean Mode: ${cleanMode ? "On" : "Off"}`;
+
+  toggleButtons.forEach((btn) => {
+    const suppressedLayers = ["sr", "weakZones", "liquiditySweeps", "clusters", "reactionZones"];
+    const suppressed = cleanMode && suppressedLayers.includes(btn.dataset.layer);
+    btn.classList.toggle("clean-mode-suppressed", suppressed);
+    btn.title = suppressed ? "Hidden while Clean Mode is on" : "";
+  });
+}
+
 function applyIndicatorVisibility() {
   vwapSeries.applyOptions({ visible: layerState.vwap });
   ema9Series.applyOptions({ visible: layerState.emas });
-  ema20Series.applyOptions({ visible: layerState.emas });
+  ema20Series.applyOptions({ visible: layerState.emas && !cleanMode });
 }
 
 function clearPriceLines() {
@@ -267,6 +304,14 @@ function updateLegend(data) {
   const latestEMA20 = indicators.ema20?.length ? indicators.ema20[indicators.ema20.length - 1].value : null;
   const stream = latestPayload.stream_status || {};
   const trade = latestPayload.latest_trade;
+  const setups = latestPayload.confirmation_setups?.setups || [];
+  const demandZones = (latestPayload.supply_demand?.demand || []).filter(zone => !(cleanMode && isWeakZone(zone)));
+  const supplyZones = (latestPayload.supply_demand?.supply || []).filter(zone => !(cleanMode && isWeakZone(zone)));
+  const bestSetup = setups.reduce((best, setup) => {
+    const score = setup.professional_score ?? setup.score ?? 0;
+    const bestScore = best?.professional_score ?? best?.score ?? -1;
+    return score > bestScore ? setup : best;
+  }, null);
 
   legendEl.innerHTML = [
     textPill(`Timeframe: ${activeTimeframe.replace("Min", "m")}`),
@@ -279,18 +324,18 @@ function updateLegend(data) {
     pill("PDC", levels.pdc),
     pill("VWAP", latestVWAP),
     pill("EMA9", latestEMA9),
-    pill("EMA20", latestEMA20),
-    textPill(`Support: ${(latestPayload.support_resistance?.support || []).map(x => `${x.price.toFixed(2)} ${x.reliability_label || ""} ${x.reliability_score || ""}`).join(", ") || "none"}`),
-    textPill(`Resistance: ${(latestPayload.support_resistance?.resistance || []).map(x => `${x.price.toFixed(2)} ${x.reliability_label || ""} ${x.reliability_score || ""}`).join(", ") || "none"}`),
-    textPill(`Reaction Zones 30m: ${[
+    cleanMode ? "" : pill("EMA20", latestEMA20),
+    cleanMode ? "" : textPill(`Support: ${(latestPayload.support_resistance?.support || []).map(x => `${x.price.toFixed(2)} ${x.reliability_label || ""} ${x.reliability_score || ""}`).join(", ") || "none"}`),
+    cleanMode ? "" : textPill(`Resistance: ${(latestPayload.support_resistance?.resistance || []).map(x => `${x.price.toFixed(2)} ${x.reliability_label || ""} ${x.reliability_score || ""}`).join(", ") || "none"}`),
+    cleanMode ? "" : textPill(`Reaction Zones 30m: ${[
       ...(latestPayload.structure_reactions?.resistance_watch || []).map(z => `Watch R ${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.score || ""}`),
       ...(latestPayload.structure_reactions?.support_watch || []).map(z => `Watch S ${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.score || ""}`),
     ].join(" | ") || "none"}`),
-    textPill(`Demand: ${(latestPayload.supply_demand?.demand || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.label || ""} ${z.reliability_score || ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
-    textPill(`Supply: ${(latestPayload.supply_demand?.supply || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.label || ""} ${z.reliability_score || ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
-    textPill(`Upside Sweep: ${(latestPayload.liquidity_sweeps?.upside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
-    textPill(`Downside Sweep: ${(latestPayload.liquidity_sweeps?.downside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
-    textPill(`Clusters: ${(latestPayload.level_clusters?.clusters || []).map(c => `${c.low.toFixed(2)}-${c.high.toFixed(2)} ${c.label || ""}`).join(" | ") || "none"}`),
+    textPill(`Demand: ${demandZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.label || ""} ${z.reliability_score || ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
+    textPill(`Supply: ${supplyZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.label || ""} ${z.reliability_score || ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
+    cleanMode ? "" : textPill(`Upside Sweep: ${(latestPayload.liquidity_sweeps?.upside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
+    cleanMode ? "" : textPill(`Downside Sweep: ${(latestPayload.liquidity_sweeps?.downside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
+    cleanMode ? "" : textPill(`Clusters: ${(latestPayload.level_clusters?.clusters || []).map(c => `${c.low.toFixed(2)}-${c.high.toFixed(2)} ${c.label || ""}`).join(" | ") || "none"}`),
     textPill(`Pro Grade: ${latestPayload.professional_context?.professional_grade || "n/a"} | Market: ${latestPayload.professional_context?.market_alignment || "n/a"} | Regime: ${latestPayload.professional_context?.aapl?.regime?.regime || "n/a"} | Chop ${latestPayload.professional_context?.aapl?.regime?.chop_score ?? "n/a"}`),
     textPill(`SPY: ${latestPayload.professional_context?.spy?.trend?.label || "n/a"} / ${latestPayload.professional_context?.spy?.regime?.regime || "n/a"} | QQQ: ${latestPayload.professional_context?.qqq?.trend?.label || "n/a"} / ${latestPayload.professional_context?.qqq?.regime?.regime || "n/a"}`),
     textPill(`AAPL: ${latestPayload.professional_context?.aapl?.trend?.label || "n/a"} | RVOL ${latestPayload.professional_context?.aapl?.rvol || "n/a"}x | ATR14 ${latestPayload.professional_context?.aapl?.atr14 || "n/a"} | RS ${latestPayload.professional_context?.aapl?.relative_strength || "n/a"}`),
@@ -298,7 +343,8 @@ function updateLegend(data) {
     textPill(`Logger: setups +${latestPayload.setup_logging?.logged_setups ?? 0} | outcomes +${latestPayload.setup_logging?.outcomes_evaluated ?? 0}`),
     textPill(`Trend Filter: ${latestPayload.confirmation_setups?.trend?.label || "n/a"} | Price ${latestPayload.confirmation_setups?.trend?.price?.toFixed?.(2) || "n/a"} | VWAP ${latestPayload.confirmation_setups?.trend?.vwap?.toFixed?.(2) || "n/a"} | EMA9 ${latestPayload.confirmation_setups?.trend?.ema9?.toFixed?.(2) || "n/a"} | EMA20 ${latestPayload.confirmation_setups?.trend?.ema20?.toFixed?.(2) || "n/a"}`),
     textPill(`Setup Status: ${latestPayload.confirmation_setups?.status || "NO_SETUP"}`),
-    textPill(`Setups: ${(latestPayload.confirmation_setups?.setups || []).map(s => `${s.professional_grade || ""} ${s.status} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.professional_score ?? s.score ?? 0} vol ${s.volume_ratio || "n/a"}x`).join(" | ") || "none"}`),
+    textPill(`Best Setup: ${latestPayload.confirmation_setups?.best_grade || bestSetup?.professional_grade || "NO_TRADE"} / ${bestSetup?.professional_score ?? bestSetup?.score ?? 0}`),
+    textPill(`Setups: ${setups.map(s => `${s.professional_grade || ""} ${s.status} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.professional_score ?? s.score ?? 0} vol ${s.volume_ratio || "n/a"}x`).join(" | ") || "none"}`),
     textPill("Read-only labels: A+ / A / B / C / NO_TRADE and WATCH / CONFIRMED / INVALIDATED"),
     textPill(levels.premarket_window || "Premarket: 04:00-09:30 ET"),
   ].join("");
@@ -359,7 +405,7 @@ function drawStaticLevels(data) {
     addLevel("PDC", levels.pdc, COLORS.previousClose, LightweightCharts.LineStyle.Dotted);
   }
 
-  if (layerState.sr) {
+  if (isLayerVisible("sr")) {
     const sr = data.support_resistance || {};
 
     (sr.resistance || []).forEach((level, index) => {
@@ -374,22 +420,16 @@ function drawStaticLevels(data) {
   if (layerState.supplyDemand) {
     const sd = data.supply_demand || {};
 
-    const shouldShowZone = (zone) => {
-      const label = zone.label || "";
-      if (label.includes("Weak Zone") && !layerState.weakZones) return false;
-      return true;
-    };
-
-    (sd.supply || []).filter(shouldShowZone).forEach((zone, index) => {
+    chartSupplyDemandZones(sd.supply).forEach((zone, index) => {
       addZoneBand(`Supply ${index + 1}`, zone, { zone: COLORS.supply });
     });
 
-    (sd.demand || []).filter(shouldShowZone).forEach((zone, index) => {
+    chartSupplyDemandZones(sd.demand).forEach((zone, index) => {
       addZoneBand(`Demand ${index + 1}`, zone, { zone: COLORS.demand });
     });
   }
 
-  if (layerState.liquiditySweeps) {
+  if (isLayerVisible("liquiditySweeps")) {
     const sweeps = data.liquidity_sweeps || {};
 
     (sweeps.upside || []).forEach((zone, index) => {
@@ -401,7 +441,7 @@ function drawStaticLevels(data) {
     });
   }
 
-  if (layerState.clusters) {
+  if (isLayerVisible("clusters")) {
     const clusters = data.level_clusters?.clusters || [];
 
     clusters.forEach((cluster, index) => {
@@ -411,7 +451,7 @@ function drawStaticLevels(data) {
     });
   }
 
-  if (layerState.reactionZones) {
+  if (isLayerVisible("reactionZones")) {
     const reactions = data.structure_reactions || {};
 
     (reactions.resistance_watch || []).forEach((zone, index) => {
@@ -547,6 +587,25 @@ toggleButtons.forEach((btn) => {
   });
 });
 
+cleanModeToggle.addEventListener("click", () => {
+  cleanMode = !cleanMode;
+
+  try {
+    localStorage.setItem(CLEAN_MODE_STORAGE_KEY, String(cleanMode));
+  } catch (_) {
+    // Clean Mode still works for this session when storage is unavailable.
+  }
+
+  updateCleanModeControl();
+
+  if (latestPayload) {
+    drawStaticLevels(latestPayload);
+    updateLegend(latestPayload);
+  }
+
+  applyIndicatorVisibility();
+});
+
 window.addEventListener("resize", () => {
   chart.applyOptions({ width: chartEl.clientWidth });
 });
@@ -573,4 +632,5 @@ setInterval(() => {
   }
 }, 30000);
 
+updateCleanModeControl();
 reloadForTimeframe();
