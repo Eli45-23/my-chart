@@ -1468,6 +1468,266 @@ def enhance_supply_demand_zones(supply_demand, candles, current_price=None, time
     return result
 
 
+
+
+def latest_indicator_value(series):
+    if not series:
+        return None
+    return series[-1].get("value")
+
+
+def build_confirmation_level_candidates(levels=None, support_resistance=None, supply_demand=None):
+    levels = levels or {}
+    support_resistance = support_resistance or {"support": [], "resistance": []}
+    supply_demand = supply_demand or {"demand": [], "supply": []}
+
+    candidates = []
+
+    def add(side, price, name, kind, low=None, high=None, confidence=None):
+        if price is None:
+            return
+        candidates.append({
+            "side": side,
+            "price": round_price(price),
+            "name": name,
+            "kind": kind,
+            "low": round_price(low if low is not None else price),
+            "high": round_price(high if high is not None else price),
+            "confidence": confidence or "watch",
+        })
+
+    add("upside", levels.get("pmh"), "PMH", "premarket_high")
+    add("downside", levels.get("pml"), "PML", "premarket_low")
+    add("upside", levels.get("pdh"), "PDH", "previous_day_high")
+    add("downside", levels.get("pdl"), "PDL", "previous_day_low")
+
+    for idx, r in enumerate(support_resistance.get("resistance", []) or []):
+        add("upside", r.get("price"), f"R{idx + 1}", "resistance", confidence=r.get("reliability_label"))
+
+    for idx, s in enumerate(support_resistance.get("support", []) or []):
+        add("downside", s.get("price"), f"S{idx + 1}", "support", confidence=s.get("reliability_label"))
+
+    for idx, z in enumerate(supply_demand.get("supply", []) or []):
+        add("upside", z.get("high"), f"Supply {idx + 1}", "supply", low=z.get("low"), high=z.get("high"), confidence=z.get("label"))
+
+    for idx, z in enumerate(supply_demand.get("demand", []) or []):
+        add("downside", z.get("low"), f"Demand {idx + 1}", "demand", low=z.get("low"), high=z.get("high"), confidence=z.get("label"))
+
+    return candidates
+
+
+def confirmation_trend(current_price, indicators):
+    vwap = latest_indicator_value(indicators.get("vwap"))
+    ema9 = latest_indicator_value(indicators.get("ema9"))
+    ema20 = latest_indicator_value(indicators.get("ema20"))
+
+    bullish = (
+        current_price is not None
+        and vwap is not None
+        and ema9 is not None
+        and ema20 is not None
+        and current_price > vwap
+        and ema9 > ema20
+    )
+    bearish = (
+        current_price is not None
+        and vwap is not None
+        and ema9 is not None
+        and ema20 is not None
+        and current_price < vwap
+        and ema9 < ema20
+    )
+
+    if bullish:
+        label = "BULLISH"
+    elif bearish:
+        label = "BEARISH"
+    else:
+        label = "MIXED"
+
+    return {
+        "label": label,
+        "price": round_price(current_price),
+        "vwap": round_price(vwap),
+        "ema9": round_price(ema9),
+        "ema20": round_price(ema20),
+        "bullish": bullish,
+        "bearish": bearish,
+        "rules": "Bullish = price above VWAP and EMA9 above EMA20. Bearish = price below VWAP and EMA9 below EMA20.",
+    }
+
+
+def detect_confirmation_setups(candles, current_price=None, levels=None, support_resistance=None, supply_demand=None, indicators=None, lookback=8):
+    """
+    Read-only chart confirmation layer.
+
+    WATCH:
+      Price touched/swept a level, but all confirmation rules are not complete.
+
+    CONFIRMED:
+      Trend, reclaim/rejection, volume, and structure agree.
+
+    INVALIDATED:
+      Price closes through the level in the wrong direction.
+
+    This is chart context only. It does not place trades.
+    """
+    indicators = indicators or {}
+    candles = candles or []
+    trend = confirmation_trend(current_price, indicators)
+    candidates = build_confirmation_level_candidates(levels, support_resistance, supply_demand)
+
+    if len(candles) < 3 or not candidates:
+        return {
+            "status": "NO_SETUP",
+            "trend": trend,
+            "setups": [],
+            "meta": {
+                "rule": "Need enough candles and at least one reference level.",
+                "read_only": True,
+            },
+        }
+
+    setups = []
+    start = max(1, len(candles) - lookback)
+
+    for i in range(start, len(candles)):
+        candle = candles[i]
+        prev = candles[i - 1] if i > 0 else None
+        next_candle = candles[i + 1] if i + 1 < len(candles) else None
+
+        for level in candidates:
+            price = level.get("price")
+            if price is None:
+                continue
+
+            tolerance = max(0.03, price * 0.00025)
+            touched = candle["low"] - tolerance <= price <= candle["high"] + tolerance
+
+            if not touched:
+                continue
+
+            wick_below = candle["low"] < price - tolerance
+            wick_above = candle["high"] > price + tolerance
+            bullish_reclaim = wick_below and candle["close"] > price
+            bearish_rejection = wick_above and candle["close"] < price
+
+            if bullish_reclaim:
+                direction = "bullish"
+                reclaim_confirmed = True
+                interaction = "wick_below_close_back_above"
+            elif bearish_rejection:
+                direction = "bearish"
+                reclaim_confirmed = True
+                interaction = "wick_above_close_back_below"
+            else:
+                direction = "bullish" if level.get("side") == "downside" else "bearish"
+                reclaim_confirmed = False
+                interaction = "level_touched_waiting_for_reclaim_or_rejection"
+
+            avg_vol = average_volume(candles, i, 20)
+            candle_vol = candle.get("volume") or 0
+            volume_confirmed = avg_vol > 0 and candle_vol > avg_vol
+            volume_ratio = round(candle_vol / avg_vol, 2) if avg_vol > 0 else None
+
+            higher_low = prev is not None and candle["low"] > prev["low"]
+            lower_high = prev is not None and candle["high"] < prev["high"]
+            breaks_trigger_high = next_candle is not None and (
+                next_candle["high"] > candle["high"] or next_candle["close"] > candle["high"]
+            )
+            breaks_trigger_low = next_candle is not None and (
+                next_candle["low"] < candle["low"] or next_candle["close"] < candle["low"]
+            )
+
+            if direction == "bullish":
+                structure_confirmed = higher_low or breaks_trigger_high
+                trend_confirmed = trend["bullish"]
+                invalidated = candle["close"] < price - tolerance
+                trigger = round_price(candle["high"])
+                invalidation = round_price(price - tolerance)
+            else:
+                structure_confirmed = lower_high or breaks_trigger_low
+                trend_confirmed = trend["bearish"]
+                invalidated = candle["close"] > price + tolerance
+                trigger = round_price(candle["low"])
+                invalidation = round_price(price + tolerance)
+
+            score = 0
+            if reclaim_confirmed:
+                score += 35
+            if volume_confirmed:
+                score += 20
+            if structure_confirmed:
+                score += 20
+            if trend_confirmed:
+                score += 20
+            if level.get("name") in {"PMH", "PML", "PDH", "PDL"}:
+                score += 5
+            score = min(100, score)
+
+            if invalidated:
+                status = "INVALIDATED"
+            elif reclaim_confirmed and volume_confirmed and structure_confirmed and trend_confirmed:
+                status = "CONFIRMED"
+            else:
+                status = "WATCH"
+
+            setups.append({
+                "status": status,
+                "direction": direction,
+                "source": level.get("name"),
+                "kind": level.get("kind"),
+                "level_price": round_price(price),
+                "level_low": level.get("low"),
+                "level_high": level.get("high"),
+                "interaction": interaction,
+                "trigger": trigger,
+                "invalidation": invalidation,
+                "score": score,
+                "volume_ratio": volume_ratio,
+                "trend_confirmed": bool(trend_confirmed),
+                "volume_confirmed": bool(volume_confirmed),
+                "structure_confirmed": bool(structure_confirmed),
+                "reclaim_confirmed": bool(reclaim_confirmed),
+                "candle_time": candle.get("time"),
+                "read_only": True,
+                "note": "Chart context only. Not an order or automatic trade signal.",
+            })
+
+    priority = {"CONFIRMED": 0, "WATCH": 1, "INVALIDATED": 2}
+    setups = sorted(
+        setups,
+        key=lambda s: (
+            priority.get(s["status"], 9),
+            -s.get("score", 0),
+            abs((current_price or s["level_price"]) - s["level_price"]),
+        )
+    )[:6]
+
+    if any(s["status"] == "CONFIRMED" for s in setups):
+        overall = "CONFIRMED"
+    elif any(s["status"] == "WATCH" for s in setups):
+        overall = "WATCH"
+    elif any(s["status"] == "INVALIDATED" for s in setups):
+        overall = "INVALIDATED"
+    else:
+        overall = "NO_SETUP"
+
+    return {
+        "status": overall,
+        "trend": trend,
+        "setups": setups,
+        "meta": {
+            "read_only": True,
+            "lookback_bars": lookback,
+            "volume_rule": "Current candle volume greater than previous 20-candle average.",
+            "trend_rule": "Price vs VWAP and EMA9 vs EMA20.",
+            "confirmation_rule": "Reclaim/rejection + volume + structure + trend.",
+            "labels": ["WATCH", "CONFIRMED", "INVALIDATED"],
+        },
+    }
+
+
 def build_level_clusters(current_price, levels=None, support_resistance=None, supply_demand=None, liquidity_sweeps=None):
     levels = levels or {}
     support_resistance = support_resistance or {"support": [], "resistance": []}
@@ -1681,6 +1941,21 @@ def chart_data():
             liquidity_sweeps=liquidity_sweeps,
         )
 
+        indicators = {
+            "vwap": calc_vwap(indicators_source),
+            "ema9": calc_ema(indicators_source, 9),
+            "ema20": calc_ema(indicators_source, 20),
+        }
+
+        confirmation_setups = detect_confirmation_setups(
+            indicators_source,
+            current_price=current_price,
+            levels=levels,
+            support_resistance=support_resistance,
+            supply_demand=supply_demand,
+            indicators=indicators,
+        )
+
         return jsonify({
             "symbol": SYMBOL,
             "timeframe": timeframe,
@@ -1695,11 +1970,8 @@ def chart_data():
             "supply_demand": supply_demand,
             "liquidity_sweeps": liquidity_sweeps,
             "level_clusters": level_clusters,
-            "indicators": {
-                "vwap": calc_vwap(indicators_source),
-                "ema9": calc_ema(indicators_source, 9),
-                "ema20": calc_ema(indicators_source, 20),
-            },
+            "confirmation_setups": confirmation_setups,
+            "indicators": indicators,
             "data_status": "ok",
             "errors": [],
         })
@@ -1718,6 +1990,7 @@ def chart_data():
             "supply_demand": {"demand": [], "supply": []},
             "liquidity_sweeps": {"upside": [], "downside": [], "status": "ERROR"},
             "level_clusters": {"clusters": [], "note": "error"},
+            "confirmation_setups": {"status": "ERROR", "trend": {}, "setups": [], "meta": {"read_only": True}},
             "indicators": {},
             "data_status": "error",
             "errors": [str(e)],

@@ -18,6 +18,7 @@ const layerState = {
   liquiditySweeps: true,
   clusters: true,
   reactionZones: true,
+  confirmationSetups: true,
 };
 
 const COLORS = {
@@ -36,6 +37,9 @@ const COLORS = {
   downsideCluster: "#00e5ff",
   supportWatch: "#64b5f6",
   resistanceWatch: "#ffcc80",
+  confirmationWatch: "#d500f9",
+  confirmationConfirmed: "#ffd600",
+  confirmationInvalid: "#9e9e9e",
 };
 
 let activeTimeframe = "1Min";
@@ -287,10 +291,51 @@ function updateLegend(data) {
     textPill(`Upside Sweep: ${(latestPayload.liquidity_sweeps?.upside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
     textPill(`Downside Sweep: ${(latestPayload.liquidity_sweeps?.downside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
     textPill(`Clusters: ${(latestPayload.level_clusters?.clusters || []).map(c => `${c.low.toFixed(2)}-${c.high.toFixed(2)} ${c.label || ""}`).join(" | ") || "none"}`),
+    textPill(`Trend Filter: ${latestPayload.confirmation_setups?.trend?.label || "n/a"} | Price ${latestPayload.confirmation_setups?.trend?.price?.toFixed?.(2) || "n/a"} | VWAP ${latestPayload.confirmation_setups?.trend?.vwap?.toFixed?.(2) || "n/a"} | EMA9 ${latestPayload.confirmation_setups?.trend?.ema9?.toFixed?.(2) || "n/a"} | EMA20 ${latestPayload.confirmation_setups?.trend?.ema20?.toFixed?.(2) || "n/a"}`),
+    textPill(`Setup Status: ${latestPayload.confirmation_setups?.status || "NO_SETUP"}`),
+    textPill(`Setups: ${(latestPayload.confirmation_setups?.setups || []).map(s => `${s.status} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.score || 0} vol ${s.volume_ratio || "n/a"}x`).join(" | ") || "none"}`),
+    textPill("Read-only setup labels: WATCH / CONFIRMED / INVALIDATED"),
     textPill(levels.premarket_window || "Premarket: 04:00-09:30 ET"),
   ].join("");
 
   streamStatusEl.textContent = stream.connected ? "Stream: connected" : `Stream: ${stream.error || "waiting"}`;
+}
+
+
+function addConfirmationSetup(label, setup) {
+  if (!setup) return;
+
+  const price = setup.level_price;
+  if (price === null || price === undefined) return;
+
+  let color = COLORS.confirmationWatch;
+  let style = LightweightCharts.LineStyle.Dashed;
+
+  if (setup.status === "CONFIRMED") {
+    color = COLORS.confirmationConfirmed;
+    style = LightweightCharts.LineStyle.Solid;
+  }
+
+  if (setup.status === "INVALIDATED") {
+    color = COLORS.confirmationInvalid;
+    style = LightweightCharts.LineStyle.Dotted;
+  }
+
+  addLevel(
+    `${setup.status} ${String(setup.direction || "").toUpperCase()} ${setup.source || label}`,
+    price,
+    color,
+    style,
+    true
+  );
+
+  if (setup.trigger !== null && setup.trigger !== undefined) {
+    addLevel(`${label} Trigger`, setup.trigger, color, LightweightCharts.LineStyle.Dashed, false);
+  }
+
+  if (setup.invalidation !== null && setup.invalidation !== undefined) {
+    addLevel(`${label} Invalid`, setup.invalidation, COLORS.confirmationInvalid, LightweightCharts.LineStyle.Dotted, false);
+  }
 }
 
 function drawStaticLevels(data) {
@@ -370,6 +415,13 @@ function drawStaticLevels(data) {
 
     (reactions.support_watch || []).forEach((zone, index) => {
       addReactionZone(`Watch S${index + 1}`, zone, COLORS.supportWatch);
+    });
+  }
+
+  if (layerState.confirmationSetups) {
+    const confirmation = data.confirmation_setups || {};
+    (confirmation.setups || []).slice(0, 4).forEach((setup, index) => {
+      addConfirmationSetup(`Setup ${index + 1}`, setup);
     });
   }
 
