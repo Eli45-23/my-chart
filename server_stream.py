@@ -1478,6 +1478,7 @@ SETUP_LOG_DIR = "logs"
 SETUP_LOG_PATH = os.path.join(SETUP_LOG_DIR, "confirmation_setups.jsonl")
 SETUP_OUTCOME_PATH = os.path.join(SETUP_LOG_DIR, "setup_outcomes.jsonl")
 _logged_setup_keys = set()
+_logged_outcome_keys = set()
 
 
 def ensure_setup_log_dir():
@@ -1627,12 +1628,21 @@ def evaluate_setup_outcomes(symbol, timeframe, candles, confirmation_setups):
                 elif direction == "bearish":
                     invalidated = any(c["close"] > invalidation for c in future)
 
+            setup_key_value = setup_key(symbol, timeframe, setup)
+            outcome_key = f"{setup_key_value}|h{horizon}"
+
+            if outcome_key in _logged_outcome_keys:
+                continue
+
+            _logged_outcome_keys.add(outcome_key)
+
             outcome = {
                 "evaluated_at": now_ts,
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "horizon_candles": horizon,
-                "setup_key": setup_key(symbol, timeframe, setup),
+                "setup_key": setup_key_value,
+                "outcome_key": outcome_key,
                 "setup_status": setup.get("status"),
                 "professional_grade": setup.get("professional_grade"),
                 "professional_score": setup.get("professional_score"),
@@ -1669,6 +1679,53 @@ def read_jsonl_tail(path, limit=200):
             continue
 
     return rows
+
+
+
+def load_existing_setup_log_keys():
+    """
+    Rebuild de-dupe memory from existing log files after restart.
+    This prevents repeated setup/outcome logging.
+    """
+    if os.path.exists(SETUP_LOG_PATH):
+        try:
+            with open(SETUP_LOG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                        setup = row.get("setup", {})
+                        symbol = row.get("symbol", SYMBOL)
+                        timeframe = row.get("timeframe")
+                        if setup and timeframe:
+                            _logged_setup_keys.add(setup_key(symbol, timeframe, setup))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    if os.path.exists(SETUP_OUTCOME_PATH):
+        try:
+            with open(SETUP_OUTCOME_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                        outcome_key = row.get("outcome_key")
+                        if outcome_key:
+                            _logged_outcome_keys.add(outcome_key)
+                        else:
+                            setup_key_value = row.get("setup_key")
+                            horizon = row.get("horizon_candles")
+                            if setup_key_value and horizon is not None:
+                                _logged_outcome_keys.add(f"{setup_key_value}|h{horizon}")
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    return {
+        "setup_keys": len(_logged_setup_keys),
+        "outcome_keys": len(_logged_outcome_keys),
+    }
 
 
 def summarize_setup_performance(limit=500):
@@ -3063,6 +3120,8 @@ def debug_stream_status():
 
 
 if __name__ == "__main__":
+    loaded_log_keys = load_existing_setup_log_keys()
+    print(f"Loaded setup log keys: {loaded_log_keys}")
     thread = threading.Thread(target=stream_worker, daemon=True)
     thread.start()
 
