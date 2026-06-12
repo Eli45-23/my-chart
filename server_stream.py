@@ -1470,6 +1470,394 @@ def enhance_supply_demand_zones(supply_demand, candles, current_price=None, time
 
 
 
+
+
+def calc_atr14(candles, period=14):
+    values = []
+    if not candles:
+        return values
+
+    prev_close = None
+    true_ranges = []
+
+    for c in candles:
+        high = c["high"]
+        low = c["low"]
+        close = c["close"]
+
+        if prev_close is None:
+            tr = high - low
+        else:
+            tr = max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close),
+            )
+
+        true_ranges.append(tr)
+        prev_close = close
+
+        if len(true_ranges) < period:
+            atr = sum(true_ranges) / len(true_ranges)
+        else:
+            atr = sum(true_ranges[-period:]) / period
+
+        values.append({
+            "time": c["time"],
+            "value": round(atr, 4),
+        })
+
+    return values
+
+
+def calc_rvol(candles, length=20):
+    if not candles:
+        return None
+
+    latest = candles[-1]
+    if len(candles) < 2:
+        return None
+
+    start = max(0, len(candles) - 1 - length)
+    sample = [c.get("volume") or 0 for c in candles[start:len(candles) - 1]]
+    if not sample:
+        return None
+
+    avg = sum(sample) / len(sample)
+    if avg <= 0:
+        return None
+
+    return round((latest.get("volume") or 0) / avg, 2)
+
+
+def slope_from_series(series, bars=3):
+    if not series or len(series) <= bars:
+        return {
+            "slope": 0,
+            "label": "FLAT",
+        }
+
+    now = series[-1].get("value")
+    then = series[-1 - bars].get("value")
+
+    if now is None or then is None:
+        return {
+            "slope": 0,
+            "label": "FLAT",
+        }
+
+    slope = now - then
+
+    if slope > 0.03:
+        label = "RISING"
+    elif slope < -0.03:
+        label = "FALLING"
+    else:
+        label = "FLAT"
+
+    return {
+        "slope": round(slope, 4),
+        "label": label,
+    }
+
+
+def candle_body_ratio(candle):
+    rng = max(candle["high"] - candle["low"], 0.01)
+    body = abs(candle["close"] - candle["open"])
+    return body / rng
+
+
+def detect_chop_regime(candles, indicators, current_price=None):
+    if not candles or len(candles) < 12:
+        return {
+            "regime": "UNKNOWN",
+            "chop_score": 50,
+            "trend_score": 0,
+            "reason": "not_enough_candles",
+        }
+
+    recent = candles[-12:]
+    closes = [c["close"] for c in recent]
+    highs = [c["high"] for c in recent]
+    lows = [c["low"] for c in recent]
+
+    recent_range = max(highs) - min(lows)
+    avg_range = sum(max(c["high"] - c["low"], 0.01) for c in recent) / len(recent)
+    avg_body_ratio = sum(candle_body_ratio(c) for c in recent) / len(recent)
+
+    ema9 = indicators.get("ema9") or []
+    ema20 = indicators.get("ema20") or []
+    vwap = indicators.get("vwap") or []
+
+    ema_cross_noise = 0
+    paired = list(zip(ema9[-12:], ema20[-12:]))
+    last_side = None
+
+    for e9, e20 in paired:
+        v9 = e9.get("value")
+        v20 = e20.get("value")
+        if v9 is None or v20 is None:
+            continue
+
+        side = "above" if v9 > v20 else "below" if v9 < v20 else "same"
+        if last_side and side != last_side and side != "same":
+            ema_cross_noise += 1
+        if side != "same":
+            last_side = side
+
+    vwap_slope = slope_from_series(vwap, bars=3)
+
+    overlap_count = 0
+    for i in range(1, len(recent)):
+        prev = recent[i - 1]
+        cur = recent[i]
+        if max(prev["low"], cur["low"]) <= min(prev["high"], cur["high"]):
+            overlap_count += 1
+
+    overlap_ratio = overlap_count / max(1, len(recent) - 1)
+
+    chop_score = 0
+    if avg_body_ratio < 0.45:
+        chop_score += 20
+    if overlap_ratio > 0.60:
+        chop_score += 25
+    if ema_cross_noise >= 2:
+        chop_score += 25
+    if vwap_slope["label"] == "FLAT":
+        chop_score += 20
+    if recent_range < avg_range * 3:
+        chop_score += 10
+
+    trend_score = 100 - min(100, chop_score)
+
+    if chop_score >= 70:
+        regime = "CHOP"
+    elif chop_score >= 50:
+        regime = "RANGE"
+    else:
+        regime = "TREND"
+
+    return {
+        "regime": regime,
+        "chop_score": int(min(100, chop_score)),
+        "trend_score": int(max(0, trend_score)),
+        "vwap_slope": vwap_slope,
+        "ema_cross_noise": ema_cross_noise,
+        "overlap_ratio": round(overlap_ratio, 2),
+        "avg_body_ratio": round(avg_body_ratio, 2),
+        "recent_range": round_price(recent_range),
+        "avg_range": round_price(avg_range),
+        "reason": "CHOP if overlap/cross noise/flat VWAP dominate; TREND if structure is cleaner.",
+    }
+
+
+def fetch_context_symbol(symbol, start, end, timeframe):
+    try:
+        bars = fetch_bars(symbol, start, end, timeframe=timeframe)
+        candles = normalize_candles(bars)
+        regular = []
+        for c in candles:
+            dt_utc = datetime.fromtimestamp(c["time"], tz=timezone.utc)
+            if is_regular_dt(dt_utc):
+                regular.append(c)
+        source = regular if regular else candles
+        indicators = {
+            "vwap": calc_vwap(source),
+            "ema9": calc_ema(source, 9),
+            "ema20": calc_ema(source, 20),
+            "atr14": calc_atr14(source, 14),
+        }
+        current = source[-1]["close"] if source else None
+        trend = confirmation_trend(current, indicators)
+        regime = detect_chop_regime(source, indicators, current_price=current)
+        return {
+            "symbol": symbol,
+            "current_price": round_price(current),
+            "trend": trend,
+            "regime": regime,
+            "rvol": calc_rvol(source, 20),
+            "data_status": "ok",
+        }
+    except Exception as e:
+        return {
+            "symbol": symbol,
+            "current_price": None,
+            "trend": {"label": "UNKNOWN"},
+            "regime": {"regime": "UNKNOWN", "reason": str(e)},
+            "rvol": None,
+            "data_status": "error",
+            "error": str(e),
+        }
+
+
+def build_professional_market_context(candles, indicators, current_price, timeframe, today_start, today_end):
+    aapl_trend = confirmation_trend(current_price, indicators)
+    aapl_regime = detect_chop_regime(candles, indicators, current_price=current_price)
+    aapl_rvol = calc_rvol(candles, 20)
+    atr14 = latest_indicator_value(indicators.get("atr14"))
+
+    spy = fetch_context_symbol("SPY", today_start, today_end, timeframe)
+    qqq = fetch_context_symbol("QQQ", today_start, today_end, timeframe)
+
+    spy_bull = spy.get("trend", {}).get("bullish", False)
+    qqq_bull = qqq.get("trend", {}).get("bullish", False)
+    spy_bear = spy.get("trend", {}).get("bearish", False)
+    qqq_bear = qqq.get("trend", {}).get("bearish", False)
+
+    market_bullish = spy_bull and qqq_bull
+    market_bearish = spy_bear and qqq_bear
+
+    if market_bullish:
+        market_alignment = "BULLISH"
+    elif market_bearish:
+        market_alignment = "BEARISH"
+    elif spy_bull or qqq_bull or spy_bear or qqq_bear:
+        market_alignment = "MIXED"
+    else:
+        market_alignment = "UNKNOWN"
+
+    relative_strength = "UNKNOWN"
+    if current_price is not None and candles and spy.get("current_price") and qqq.get("current_price"):
+        aapl_open = candles[0]["open"]
+        if aapl_open:
+            aapl_change = (current_price - aapl_open) / aapl_open
+        else:
+            aapl_change = 0
+
+        # Use trend agreement as a practical intraday RS proxy.
+        if aapl_change > 0 and market_alignment in {"MIXED", "BULLISH"} and aapl_trend["bullish"]:
+            relative_strength = "STRONG"
+        elif aapl_change < 0 and market_alignment in {"MIXED", "BEARISH"} and aapl_trend["bearish"]:
+            relative_strength = "WEAK"
+        else:
+            relative_strength = "NEUTRAL"
+
+    no_trade = False
+    warnings = []
+
+    if aapl_regime["regime"] == "CHOP":
+        no_trade = True
+        warnings.append("AAPL chop regime detected.")
+
+    if spy.get("regime", {}).get("regime") == "CHOP" and qqq.get("regime", {}).get("regime") == "CHOP":
+        no_trade = True
+        warnings.append("SPY and QQQ both choppy.")
+
+    if market_alignment == "MIXED":
+        warnings.append("SPY and QQQ are mixed.")
+
+    if aapl_rvol is not None and aapl_rvol < 0.80:
+        warnings.append("AAPL relative volume is low.")
+
+    if atr14 is not None and atr14 < 0.15:
+        warnings.append("AAPL ATR is low for active intraday movement.")
+
+    if no_trade:
+        professional_grade = "NO_TRADE"
+    elif aapl_trend["bullish"] and market_bullish and aapl_regime["regime"] == "TREND" and (aapl_rvol or 0) >= 1:
+        professional_grade = "A"
+    elif aapl_trend["bearish"] and market_bearish and aapl_regime["regime"] == "TREND" and (aapl_rvol or 0) >= 1:
+        professional_grade = "A"
+    elif market_alignment in {"BULLISH", "BEARISH"} and aapl_regime["regime"] != "CHOP":
+        professional_grade = "B"
+    elif market_alignment == "MIXED":
+        professional_grade = "C"
+    else:
+        professional_grade = "C"
+
+    return {
+        "timeframe": timeframe,
+        "aapl": {
+            "trend": aapl_trend,
+            "regime": aapl_regime,
+            "rvol": aapl_rvol,
+            "atr14": round_price(atr14),
+            "relative_strength": relative_strength,
+        },
+        "spy": spy,
+        "qqq": qqq,
+        "market_alignment": market_alignment,
+        "professional_grade": professional_grade,
+        "no_trade": no_trade,
+        "warnings": warnings,
+        "read_only": True,
+        "note": "Professional context only. It does not place trades.",
+    }
+
+
+def grade_confirmation_setups_with_context(confirmation_setups, professional_context):
+    confirmation_setups = dict(confirmation_setups or {})
+    setups = []
+
+    market_alignment = professional_context.get("market_alignment")
+    regime = professional_context.get("aapl", {}).get("regime", {}).get("regime")
+    no_trade = professional_context.get("no_trade", False)
+
+    for setup in confirmation_setups.get("setups", []) or []:
+        s = dict(setup)
+        score = int(s.get("score", 0) or 0)
+
+        direction = s.get("direction")
+        aligned = (
+            direction == "bullish" and market_alignment == "BULLISH"
+        ) or (
+            direction == "bearish" and market_alignment == "BEARISH"
+        )
+
+        if aligned:
+            score += 15
+        else:
+            score -= 10
+
+        if regime == "TREND":
+            score += 10
+        elif regime == "RANGE":
+            score -= 5
+        elif regime == "CHOP":
+            score -= 25
+
+        if no_trade:
+            score -= 35
+
+        score = max(0, min(100, score))
+
+        if no_trade:
+            grade = "NO_TRADE"
+        elif score >= 90:
+            grade = "A+"
+        elif score >= 80:
+            grade = "A"
+        elif score >= 65:
+            grade = "B"
+        elif score >= 50:
+            grade = "C"
+        else:
+            grade = "NO_TRADE"
+
+        s["professional_score"] = score
+        s["professional_grade"] = grade
+        s["market_aligned"] = aligned
+        s["market_alignment"] = market_alignment
+        s["regime"] = regime
+        s["no_trade_context"] = no_trade
+
+        setups.append(s)
+
+    confirmation_setups["setups"] = sorted(
+        setups,
+        key=lambda s: (
+            0 if s.get("professional_grade") == "A+" else
+            1 if s.get("professional_grade") == "A" else
+            2 if s.get("professional_grade") == "B" else
+            3 if s.get("professional_grade") == "C" else 4,
+            -s.get("professional_score", 0),
+        )
+    )
+
+    confirmation_setups["professional_context_applied"] = True
+    return confirmation_setups
+
+
 def latest_indicator_value(series):
     if not series:
         return None
@@ -1945,6 +2333,7 @@ def chart_data():
             "vwap": calc_vwap(indicators_source),
             "ema9": calc_ema(indicators_source, 9),
             "ema20": calc_ema(indicators_source, 20),
+            "atr14": calc_atr14(indicators_source, 14),
         }
 
         confirmation_setups = detect_confirmation_setups(
@@ -1954,6 +2343,20 @@ def chart_data():
             support_resistance=support_resistance,
             supply_demand=supply_demand,
             indicators=indicators,
+        )
+
+        professional_context = build_professional_market_context(
+            indicators_source,
+            indicators,
+            current_price,
+            timeframe,
+            today_start,
+            today_end,
+        )
+
+        confirmation_setups = grade_confirmation_setups_with_context(
+            confirmation_setups,
+            professional_context,
         )
 
         return jsonify({
@@ -1971,6 +2374,7 @@ def chart_data():
             "liquidity_sweeps": liquidity_sweeps,
             "level_clusters": level_clusters,
             "confirmation_setups": confirmation_setups,
+            "professional_context": professional_context,
             "indicators": indicators,
             "data_status": "ok",
             "errors": [],
@@ -1991,6 +2395,7 @@ def chart_data():
             "liquidity_sweeps": {"upside": [], "downside": [], "status": "ERROR"},
             "level_clusters": {"clusters": [], "note": "error"},
             "confirmation_setups": {"status": "ERROR", "trend": {}, "setups": [], "meta": {"read_only": True}},
+            "professional_context": {"professional_grade": "ERROR", "warnings": ["chart error"], "read_only": True},
             "indicators": {},
             "data_status": "error",
             "errors": [str(e)],

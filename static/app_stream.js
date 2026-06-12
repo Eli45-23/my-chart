@@ -291,10 +291,14 @@ function updateLegend(data) {
     textPill(`Upside Sweep: ${(latestPayload.liquidity_sweeps?.upside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
     textPill(`Downside Sweep: ${(latestPayload.liquidity_sweeps?.downside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
     textPill(`Clusters: ${(latestPayload.level_clusters?.clusters || []).map(c => `${c.low.toFixed(2)}-${c.high.toFixed(2)} ${c.label || ""}`).join(" | ") || "none"}`),
+    textPill(`Pro Grade: ${latestPayload.professional_context?.professional_grade || "n/a"} | Market: ${latestPayload.professional_context?.market_alignment || "n/a"} | Regime: ${latestPayload.professional_context?.aapl?.regime?.regime || "n/a"} | Chop ${latestPayload.professional_context?.aapl?.regime?.chop_score ?? "n/a"}`),
+    textPill(`SPY: ${latestPayload.professional_context?.spy?.trend?.label || "n/a"} / ${latestPayload.professional_context?.spy?.regime?.regime || "n/a"} | QQQ: ${latestPayload.professional_context?.qqq?.trend?.label || "n/a"} / ${latestPayload.professional_context?.qqq?.regime?.regime || "n/a"}`),
+    textPill(`AAPL: ${latestPayload.professional_context?.aapl?.trend?.label || "n/a"} | RVOL ${latestPayload.professional_context?.aapl?.rvol || "n/a"}x | ATR14 ${latestPayload.professional_context?.aapl?.atr14 || "n/a"} | RS ${latestPayload.professional_context?.aapl?.relative_strength || "n/a"}`),
+    textPill(`Warnings: ${(latestPayload.professional_context?.warnings || []).join(" | ") || "none"}`),
     textPill(`Trend Filter: ${latestPayload.confirmation_setups?.trend?.label || "n/a"} | Price ${latestPayload.confirmation_setups?.trend?.price?.toFixed?.(2) || "n/a"} | VWAP ${latestPayload.confirmation_setups?.trend?.vwap?.toFixed?.(2) || "n/a"} | EMA9 ${latestPayload.confirmation_setups?.trend?.ema9?.toFixed?.(2) || "n/a"} | EMA20 ${latestPayload.confirmation_setups?.trend?.ema20?.toFixed?.(2) || "n/a"}`),
     textPill(`Setup Status: ${latestPayload.confirmation_setups?.status || "NO_SETUP"}`),
-    textPill(`Setups: ${(latestPayload.confirmation_setups?.setups || []).map(s => `${s.status} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.score || 0} vol ${s.volume_ratio || "n/a"}x`).join(" | ") || "none"}`),
-    textPill("Read-only setup labels: WATCH / CONFIRMED / INVALIDATED"),
+    textPill(`Setups: ${(latestPayload.confirmation_setups?.setups || []).map(s => `${s.professional_grade || ""} ${s.status} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.professional_score ?? s.score ?? 0} vol ${s.volume_ratio || "n/a"}x`).join(" | ") || "none"}`),
+    textPill("Read-only labels: A+ / A / B / C / NO_TRADE and WATCH / CONFIRMED / INVALIDATED"),
     textPill(levels.premarket_window || "Premarket: 04:00-09:30 ET"),
   ].join("");
 
