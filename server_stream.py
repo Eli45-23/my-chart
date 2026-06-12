@@ -2726,6 +2726,304 @@ def stream_chart():
 
 
 
+
+
+@APP.route("/performance")
+def performance_dashboard():
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>AAPL Setup Performance Dashboard</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #080b10;
+      color: #e8edf5;
+      font-family: Arial, Helvetica, sans-serif;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 26px;
+    }
+    .sub {
+      color: #9aa7b8;
+      margin-bottom: 22px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: #111722;
+      border: 1px solid #263244;
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 8px 22px rgba(0,0,0,.22);
+    }
+    .label {
+      color: #9aa7b8;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .value {
+      font-size: 24px;
+      margin-top: 6px;
+      font-weight: bold;
+    }
+    .warn {
+      color: #f6c76f;
+    }
+    .good {
+      color: #76e39a;
+    }
+    .bad {
+      color: #ff8b8b;
+    }
+    .neutral {
+      color: #b7c4d8;
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    button, select {
+      background: #151e2c;
+      color: #e8edf5;
+      border: 1px solid #314057;
+      border-radius: 8px;
+      padding: 9px 11px;
+      cursor: pointer;
+    }
+    button:hover, select:hover {
+      background: #1b2738;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #0e1420;
+      border: 1px solid #263244;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    th, td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #222d3d;
+      text-align: left;
+      font-size: 13px;
+    }
+    th {
+      background: #131b28;
+      color: #aebbd0;
+      position: sticky;
+      top: 0;
+    }
+    tr:hover {
+      background: #111b2a;
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 7px;
+      border-radius: 999px;
+      font-size: 12px;
+      border: 1px solid #34445b;
+      background: #141d2b;
+    }
+    .footer {
+      color: #8f9bad;
+      margin-top: 16px;
+      font-size: 12px;
+    }
+    .empty {
+      padding: 24px;
+      background: #111722;
+      border: 1px solid #263244;
+      border-radius: 12px;
+      color: #9aa7b8;
+    }
+  </style>
+</head>
+<body>
+  <h1>AAPL Setup Performance Dashboard</h1>
+  <div class="sub">
+    Read-only review of logged chart setups. These are not executed trades.
+  </div>
+
+  <div class="controls">
+    <button onclick="loadData()">Refresh</button>
+    <select id="limit" onchange="loadData()">
+      <option value="100">Last 100 outcomes</option>
+      <option value="500" selected>Last 500 outcomes</option>
+      <option value="1000">Last 1000 outcomes</option>
+      <option value="2500">Last 2500 outcomes</option>
+    </select>
+    <span id="status" class="neutral">Loading...</span>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Total Outcomes</div>
+      <div id="totalOutcomes" class="value">-</div>
+    </div>
+    <div class="card">
+      <div class="label">Best Avg Favorable</div>
+      <div id="bestFav" class="value good">-</div>
+    </div>
+    <div class="card">
+      <div class="label">Worst Invalidation</div>
+      <div id="worstInvalidation" class="value bad">-</div>
+    </div>
+    <div class="card">
+      <div class="label">Best Timeframe</div>
+      <div id="bestTimeframe" class="value neutral">-</div>
+    </div>
+  </div>
+
+  <div id="empty" class="empty" style="display:none;">
+    No performance logs yet. Let the chart run during market hours, then refresh this page.
+  </div>
+
+  <table id="table" style="display:none;">
+    <thead>
+      <tr>
+        <th>Timeframe</th>
+        <th>Horizon</th>
+        <th>Direction</th>
+        <th>Grade</th>
+        <th>Source</th>
+        <th>Count</th>
+        <th>Avg Favorable</th>
+        <th>Avg Adverse</th>
+        <th>Invalidation Rate</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <div class="footer">
+    Tip: Favorable/adverse are stock-price movement values, not option-contract profit/loss.
+  </div>
+
+  <script>
+    function fmtNum(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+      return Number(value).toFixed(3).replace(/\.?0+$/, "");
+    }
+
+    function pct(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
+      return `${(Number(value) * 100).toFixed(1)}%`;
+    }
+
+    function gradeClass(grade) {
+      if (grade === "A+" || grade === "A") return "good";
+      if (grade === "NO_TRADE") return "bad";
+      if (grade === "B" || grade === "C") return "warn";
+      return "neutral";
+    }
+
+    function bestTimeframe(summary) {
+      const buckets = {};
+      for (const row of summary) {
+        const tf = row.timeframe || "unknown";
+        if (!buckets[tf]) buckets[tf] = { count: 0, fav: 0, adv: 0 };
+        buckets[tf].count += row.count || 0;
+        buckets[tf].fav += (row.avg_favorable_move || 0) * (row.count || 0);
+        buckets[tf].adv += (row.avg_adverse_move || 0) * (row.count || 0);
+      }
+
+      let best = null;
+      for (const [tf, item] of Object.entries(buckets)) {
+        const score = (item.fav - item.adv) / Math.max(1, item.count);
+        if (!best || score > best.score) {
+          best = { tf, score };
+        }
+      }
+      return best ? `${best.tf}` : "-";
+    }
+
+    async function loadData() {
+      const limit = document.getElementById("limit").value;
+      const status = document.getElementById("status");
+      status.textContent = "Loading...";
+      status.className = "neutral";
+
+      try {
+        const res = await fetch(`/api/debug/setup-performance?limit=${limit}`, { cache: "no-store" });
+        const data = await res.json();
+        const summary = data.summary || [];
+
+        document.getElementById("totalOutcomes").textContent = data.total_outcomes ?? 0;
+
+        if (!summary.length) {
+          document.getElementById("empty").style.display = "block";
+          document.getElementById("table").style.display = "none";
+          document.getElementById("bestFav").textContent = "-";
+          document.getElementById("worstInvalidation").textContent = "-";
+          document.getElementById("bestTimeframe").textContent = "-";
+          status.textContent = "No data yet";
+          return;
+        }
+
+        document.getElementById("empty").style.display = "none";
+        document.getElementById("table").style.display = "table";
+
+        const bestFav = [...summary].sort((a, b) => (b.avg_favorable_move || 0) - (a.avg_favorable_move || 0))[0];
+        const worstInv = [...summary].sort((a, b) => (b.invalidation_rate || 0) - (a.invalidation_rate || 0))[0];
+
+        document.getElementById("bestFav").textContent =
+          `${fmtNum(bestFav.avg_favorable_move)} ${bestFav.timeframe || ""}`;
+
+        document.getElementById("worstInvalidation").textContent =
+          `${pct(worstInv.invalidation_rate)} ${worstInv.timeframe || ""}`;
+
+        document.getElementById("bestTimeframe").textContent = bestTimeframe(summary);
+
+        const tbody = document.getElementById("tbody");
+        tbody.innerHTML = "";
+
+        for (const row of summary) {
+          const tr = document.createElement("tr");
+          const grade = row.professional_grade || "-";
+          tr.innerHTML = `
+            <td>${row.timeframe || "-"}</td>
+            <td>${row.horizon_candles || "-"} candles</td>
+            <td>${row.direction || "-"}</td>
+            <td><span class="pill ${gradeClass(grade)}">${grade}</span></td>
+            <td>${row.source || "-"}</td>
+            <td>${row.count || 0}</td>
+            <td class="good">${fmtNum(row.avg_favorable_move)}</td>
+            <td class="bad">${fmtNum(row.avg_adverse_move)}</td>
+            <td>${pct(row.invalidation_rate)}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+
+        status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        status.className = "good";
+      } catch (err) {
+        console.error(err);
+        status.textContent = "Failed to load performance data";
+        status.className = "bad";
+      }
+    }
+
+    loadData();
+    setInterval(loadData, 30000);
+  </script>
+</body>
+</html>
+    """
+
+
 @APP.route("/api/debug/setup-performance")
 def debug_setup_performance():
     limit = request.args.get("limit", "500")
