@@ -1,0 +1,131 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>AAPL Streaming Chart Test</title>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    body {
+      margin: 0;
+      background: #0f1115;
+      color: #e8eaed;
+      font-family: Arial, sans-serif;
+    }
+    .header {
+      padding: 14px 18px;
+      border-bottom: 1px solid #222832;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 700;
+    }
+    .status {
+      font-size: 13px;
+      color: #aab2c0;
+      margin-left: 8px;
+    }
+    #chart {
+      width: 100%;
+      height: 620px;
+    }
+    .legend {
+      padding: 12px 18px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      border-top: 1px solid #222832;
+      font-size: 14px;
+    }
+    .pill {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #1b2230;
+      border: 1px solid #2d3545;
+    }
+    .error {
+      color: #ff8a8a;
+      padding: 12px 18px;
+    }
+    .tf-btn {
+      background: #1b2230;
+      color: #d6d9df;
+      border: 1px solid #2d3545;
+      border-radius: 8px;
+      padding: 7px 11px;
+      margin-right: 5px;
+      cursor: pointer;
+    }
+    .tf-btn.active {
+      background: #263852;
+      border-color: #8ab4f8;
+      color: #ffffff;
+    }
+  
+    .toggle-row {
+      padding: 10px 18px;
+      border-bottom: 1px solid #222832;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .toggle-label {
+      color: #aab2c0;
+      font-size: 13px;
+      margin-right: 6px;
+    }
+    .toggle-btn {
+      background: #1b2230;
+      color: #d6d9df;
+      border: 1px solid #2d3545;
+      border-radius: 999px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .toggle-btn.active {
+      background: #20324a;
+      border-color: #8ab4f8;
+      color: #ffffff;
+    }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <div class="title">AAPL Streaming Chart Test</div>
+      <div class="status" id="status">Loading...</div>
+    </div>
+    <div>
+      <button class="tf-btn active" data-tf="1Min">1m</button>
+      <button class="tf-btn" data-tf="5Min">5m</button>
+      <button class="tf-btn" data-tf="15Min">15m</button>
+      <span class="status" id="countdown">Next 1m candle: --:--</span>
+      <span class="status" id="streamStatus">Stream: connecting...</span>
+      <span class="status">Read-only. No trading.</span>
+    </div>
+  </div>
+
+
+  <div class="toggle-row">
+    <span class="toggle-label">Layers:</span>
+    <button class="toggle-btn active" data-layer="premarket">PMH/PML</button>
+    <button class="toggle-btn active" data-layer="previousDay">PDH/PDL/PDC</button>
+    <button class="toggle-btn active" data-layer="vwap">VWAP</button>
+    <button class="toggle-btn active" data-layer="emas">EMA9/EMA20</button>
+    <button class="toggle-btn active" data-layer="sr">Support/Resistance</button>
+    <button class="toggle-btn active" data-layer="supplyDemand">Supply/Demand</button>
+    <button class="toggle-btn" data-layer="weakZones">Weak Zones</button>
+  </div>
+
+  <div id="chart"></div>
+  <div class="legend" id="legend"></div>
+  <div class="error" id="error"></div>
+
+  <script src="/app_stream.js?v=stream8"></script>
+</body>
+</html>
