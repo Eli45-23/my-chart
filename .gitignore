@@ -3,3 +3,12 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Local backup/checkpoint files
+*_backup.*
+*_before_*.py
+*_before_*.js
+*_before_*.html
+*_working_v*.py
+*_working_v*.js
+*_working_v*.html
