@@ -12,3 +12,4 @@ __pycache__/
 *_working_v*.py
 *_working_v*.js
 *_working_v*.html
+logs/*.jsonl
