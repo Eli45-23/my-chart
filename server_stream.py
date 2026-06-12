@@ -1472,6 +1472,276 @@ def enhance_supply_demand_zones(supply_demand, candles, current_price=None, time
 
 
 
+
+
+SETUP_LOG_DIR = "logs"
+SETUP_LOG_PATH = os.path.join(SETUP_LOG_DIR, "confirmation_setups.jsonl")
+SETUP_OUTCOME_PATH = os.path.join(SETUP_LOG_DIR, "setup_outcomes.jsonl")
+_logged_setup_keys = set()
+
+
+def ensure_setup_log_dir():
+    os.makedirs(SETUP_LOG_DIR, exist_ok=True)
+
+
+def setup_key(symbol, timeframe, setup):
+    return "|".join([
+        str(symbol),
+        str(timeframe),
+        str(setup.get("status")),
+        str(setup.get("direction")),
+        str(setup.get("source")),
+        str(setup.get("level_price")),
+        str(setup.get("candle_time")),
+    ])
+
+
+def append_jsonl(path, payload):
+    ensure_setup_log_dir()
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def log_confirmation_setups(symbol, timeframe, confirmation_setups, professional_context, current_price=None):
+    """
+    Logs read-only setup context once per unique setup.
+    This is for review/backtesting. It does not place trades.
+    """
+    setups = confirmation_setups.get("setups", []) if confirmation_setups else []
+    if not setups:
+        return 0
+
+    count = 0
+    now_ts = datetime.now(timezone.utc).isoformat()
+
+    for setup in setups:
+        # Only log meaningful setup states, not empty/noise.
+        if setup.get("status") not in {"WATCH", "CONFIRMED", "INVALIDATED"}:
+            continue
+
+        key = setup_key(symbol, timeframe, setup)
+        if key in _logged_setup_keys:
+            continue
+
+        _logged_setup_keys.add(key)
+
+        payload = {
+            "logged_at": now_ts,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "current_price": round_price(current_price),
+            "setup": setup,
+            "professional_context": {
+                "professional_grade": professional_context.get("professional_grade"),
+                "market_alignment": professional_context.get("market_alignment"),
+                "no_trade": professional_context.get("no_trade"),
+                "warnings": professional_context.get("warnings", []),
+                "aapl_regime": professional_context.get("aapl", {}).get("regime", {}).get("regime"),
+                "aapl_chop_score": professional_context.get("aapl", {}).get("regime", {}).get("chop_score"),
+                "aapl_rvol": professional_context.get("aapl", {}).get("rvol"),
+                "aapl_atr14": professional_context.get("aapl", {}).get("atr14"),
+                "spy_trend": professional_context.get("spy", {}).get("trend", {}).get("label"),
+                "qqq_trend": professional_context.get("qqq", {}).get("trend", {}).get("label"),
+            },
+            "read_only": True,
+        }
+
+        append_jsonl(SETUP_LOG_PATH, payload)
+        count += 1
+
+    return count
+
+
+def setup_direction_move(setup, future_candles):
+    direction = setup.get("direction")
+    level_price = setup.get("level_price")
+
+    if level_price is None or not future_candles:
+        return {
+            "max_favorable_move": None,
+            "max_adverse_move": None,
+        }
+
+    if direction == "bullish":
+        max_high = max(c["high"] for c in future_candles)
+        min_low = min(c["low"] for c in future_candles)
+        favorable = max_high - level_price
+        adverse = level_price - min_low
+    elif direction == "bearish":
+        min_low = min(c["low"] for c in future_candles)
+        max_high = max(c["high"] for c in future_candles)
+        favorable = level_price - min_low
+        adverse = max_high - level_price
+    else:
+        favorable = None
+        adverse = None
+
+    if favorable is not None:
+        favorable = max(0, favorable)
+    if adverse is not None:
+        adverse = max(0, adverse)
+
+    return {
+        "max_favorable_move": round_price(favorable),
+        "max_adverse_move": round_price(adverse),
+    }
+
+
+def evaluate_setup_outcomes(symbol, timeframe, candles, confirmation_setups):
+    """
+    Evaluates active setup context after 1, 3, 5, and 10 candles.
+    Since this is intraday/live, each API refresh can append new outcome snapshots.
+    """
+    setups = confirmation_setups.get("setups", []) if confirmation_setups else []
+    if not setups or not candles:
+        return []
+
+    outcomes = []
+    by_time = {c.get("time"): idx for idx, c in enumerate(candles)}
+    now_ts = datetime.now(timezone.utc).isoformat()
+
+    for setup in setups:
+        candle_time = setup.get("candle_time")
+        if candle_time not in by_time:
+            continue
+
+        start_idx = by_time[candle_time]
+
+        for horizon in [1, 3, 5, 10]:
+            end_idx = start_idx + horizon
+            if end_idx >= len(candles):
+                continue
+
+            future = candles[start_idx + 1:end_idx + 1]
+            if not future:
+                continue
+
+            move = setup_direction_move(setup, future)
+            invalidation = setup.get("invalidation")
+            direction = setup.get("direction")
+
+            invalidated = False
+            if invalidation is not None:
+                if direction == "bullish":
+                    invalidated = any(c["close"] < invalidation for c in future)
+                elif direction == "bearish":
+                    invalidated = any(c["close"] > invalidation for c in future)
+
+            outcome = {
+                "evaluated_at": now_ts,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "horizon_candles": horizon,
+                "setup_key": setup_key(symbol, timeframe, setup),
+                "setup_status": setup.get("status"),
+                "professional_grade": setup.get("professional_grade"),
+                "professional_score": setup.get("professional_score"),
+                "direction": direction,
+                "source": setup.get("source"),
+                "level_price": setup.get("level_price"),
+                "trigger": setup.get("trigger"),
+                "invalidation": invalidation,
+                "invalidated_within_horizon": invalidated,
+                "max_favorable_move": move.get("max_favorable_move"),
+                "max_adverse_move": move.get("max_adverse_move"),
+                "last_future_close": round_price(future[-1]["close"]),
+                "read_only": True,
+            }
+
+            append_jsonl(SETUP_OUTCOME_PATH, outcome)
+            outcomes.append(outcome)
+
+    return outcomes
+
+
+def read_jsonl_tail(path, limit=200):
+    if not os.path.exists(path):
+        return []
+
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.readlines()[-limit:]
+
+    rows = []
+    for line in lines:
+        try:
+            rows.append(json.loads(line))
+        except Exception:
+            continue
+
+    return rows
+
+
+def summarize_setup_performance(limit=500):
+    outcomes = read_jsonl_tail(SETUP_OUTCOME_PATH, limit=limit)
+    if not outcomes:
+        return {
+            "total_outcomes": 0,
+            "summary": [],
+            "note": "No outcome logs yet. Let the chart run during market hours.",
+        }
+
+    buckets = {}
+
+    for row in outcomes:
+        key = (
+            row.get("timeframe"),
+            row.get("horizon_candles"),
+            row.get("direction"),
+            row.get("professional_grade"),
+            row.get("source"),
+        )
+        bucket = buckets.setdefault(key, {
+            "timeframe": row.get("timeframe"),
+            "horizon_candles": row.get("horizon_candles"),
+            "direction": row.get("direction"),
+            "professional_grade": row.get("professional_grade"),
+            "source": row.get("source"),
+            "count": 0,
+            "invalidated": 0,
+            "avg_favorable_move": 0.0,
+            "avg_adverse_move": 0.0,
+        })
+
+        bucket["count"] += 1
+
+        if row.get("invalidated_within_horizon"):
+            bucket["invalidated"] += 1
+
+        fav = row.get("max_favorable_move")
+        adv = row.get("max_adverse_move")
+
+        if fav is not None:
+            bucket["avg_favorable_move"] += fav
+        if adv is not None:
+            bucket["avg_adverse_move"] += adv
+
+    summary = []
+
+    for bucket in buckets.values():
+        count = max(1, bucket["count"])
+        bucket["avg_favorable_move"] = round(bucket["avg_favorable_move"] / count, 3)
+        bucket["avg_adverse_move"] = round(bucket["avg_adverse_move"] / count, 3)
+        bucket["invalidation_rate"] = round(bucket["invalidated"] / count, 3)
+        summary.append(bucket)
+
+    summary = sorted(
+        summary,
+        key=lambda x: (
+            x["horizon_candles"] or 0,
+            x["invalidation_rate"],
+            -x["avg_favorable_move"],
+            x["avg_adverse_move"],
+        )
+    )
+
+    return {
+        "total_outcomes": len(outcomes),
+        "summary": summary[:50],
+        "read_only": True,
+        "note": "Performance summary is based on logged chart context, not executed trades.",
+    }
+
+
 def calc_atr14(candles, period=14):
     values = []
     if not candles:
@@ -2359,6 +2629,21 @@ def chart_data():
             professional_context,
         )
 
+        logged_setups = log_confirmation_setups(
+            SYMBOL,
+            timeframe,
+            confirmation_setups,
+            professional_context,
+            current_price=current_price,
+        )
+
+        setup_outcomes = evaluate_setup_outcomes(
+            SYMBOL,
+            timeframe,
+            indicators_source,
+            confirmation_setups,
+        )
+
         return jsonify({
             "symbol": SYMBOL,
             "timeframe": timeframe,
@@ -2375,6 +2660,13 @@ def chart_data():
             "level_clusters": level_clusters,
             "confirmation_setups": confirmation_setups,
             "professional_context": professional_context,
+            "setup_logging": {
+                "logged_setups": logged_setups,
+                "outcomes_evaluated": len(setup_outcomes),
+                "setup_log_path": SETUP_LOG_PATH,
+                "outcome_log_path": SETUP_OUTCOME_PATH,
+                "read_only": True,
+            },
             "indicators": indicators,
             "data_status": "ok",
             "errors": [],
@@ -2430,6 +2722,34 @@ def stream_chart():
                 subscribers[timeframe].remove(q)
 
     return Response(event_stream(), mimetype="text/event-stream")
+
+
+
+
+@APP.route("/api/debug/setup-performance")
+def debug_setup_performance():
+    limit = request.args.get("limit", "500")
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 500
+
+    return jsonify(summarize_setup_performance(limit=limit))
+
+
+@APP.route("/api/debug/recent-setups")
+def debug_recent_setups():
+    limit = request.args.get("limit", "50")
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 50
+
+    return jsonify({
+        "setups": read_jsonl_tail(SETUP_LOG_PATH, limit=limit),
+        "outcomes": read_jsonl_tail(SETUP_OUTCOME_PATH, limit=limit),
+        "read_only": True,
+    })
 
 
 @APP.route("/api/debug/stream-status")
