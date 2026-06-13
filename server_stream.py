@@ -4329,22 +4329,44 @@ def performance_dashboard():
       color: #b7c4d8;
     }
     .controls {
-      display: flex;
+      display: grid;
+      grid-template-columns: repeat(6, minmax(130px, 1fr));
       gap: 10px;
-      align-items: center;
+      align-items: end;
       margin-bottom: 14px;
-      flex-wrap: wrap;
     }
-    button, select {
+    .control {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .control label {
+      color: #9aa7b8;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    button, select, input {
       background: #151e2c;
       color: #e8edf5;
       border: 1px solid #314057;
       border-radius: 8px;
       padding: 9px 11px;
+    }
+    button {
       cursor: pointer;
     }
     button:hover, select:hover {
       background: #1b2738;
+    }
+    .status-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin: 10px 0 16px;
+      flex-wrap: wrap;
+      color: #9aa7b8;
+      font-size: 13px;
     }
     table {
       width: 100%;
@@ -4365,6 +4387,7 @@ def performance_dashboard():
       color: #aebbd0;
       position: sticky;
       top: 0;
+      z-index: 2;
     }
     tr:hover {
       background: #111b2a;
@@ -4376,6 +4399,7 @@ def performance_dashboard():
       font-size: 12px;
       border: 1px solid #34445b;
       background: #141d2b;
+      white-space: nowrap;
     }
     .footer {
       color: #8f9bad;
@@ -4389,6 +4413,24 @@ def performance_dashboard():
       border-radius: 12px;
       color: #9aa7b8;
     }
+    .quick-buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .quick-buttons button {
+      padding: 7px 10px;
+      font-size: 12px;
+    }
+    @media (max-width: 1000px) {
+      .grid {
+        grid-template-columns: repeat(2, minmax(140px, 1fr));
+      }
+      .controls {
+        grid-template-columns: repeat(2, minmax(130px, 1fr));
+      }
+    }
   </style>
 </head>
 <body>
@@ -4398,14 +4440,90 @@ def performance_dashboard():
   </div>
 
   <div class="controls">
-    <button onclick="loadData()">Refresh</button>
-    <select id="limit" onchange="loadData()">
-      <option value="100">Last 100 outcomes</option>
-      <option value="500" selected>Last 500 outcomes</option>
-      <option value="1000">Last 1000 outcomes</option>
-      <option value="2500">Last 2500 outcomes</option>
-    </select>
+    <div class="control">
+      <label>Log Limit</label>
+      <select id="limit" onchange="loadData()">
+        <option value="100">Last 100</option>
+        <option value="500" selected>Last 500</option>
+        <option value="1000">Last 1000</option>
+        <option value="2500">Last 2500</option>
+        <option value="5000">Last 5000</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label>Timeframe</label>
+      <select id="timeframeFilter" onchange="render()">
+        <option value="ALL">All</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label>Direction</label>
+      <select id="directionFilter" onchange="render()">
+        <option value="ALL">All</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label>Grade</label>
+      <select id="gradeFilter" onchange="render()">
+        <option value="ALL">All</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label>Source</label>
+      <select id="sourceFilter" onchange="render()">
+        <option value="ALL">All</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label>Horizon</label>
+      <select id="horizonFilter" onchange="render()">
+        <option value="ALL">All</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label>Min Count</label>
+      <input id="minCountFilter" type="number" min="0" step="1" value="0" oninput="render()" />
+    </div>
+
+    <div class="control">
+      <label>Sort By</label>
+      <select id="sortBy" onchange="render()">
+        <option value="bestEdge" selected>Best Edge</option>
+        <option value="avgFav">Avg Favorable</option>
+        <option value="avgAdv">Lowest Adverse</option>
+        <option value="invalidRate">Lowest Invalidation</option>
+        <option value="count">Most Samples</option>
+        <option value="grade">Best Grade</option>
+      </select>
+    </div>
+
+    <div class="control">
+      <label>Action</label>
+      <button onclick="loadData()">Refresh</button>
+    </div>
+
+    <div class="control">
+      <label>Reset</label>
+      <button onclick="resetFilters()">Clear Filters</button>
+    </div>
+  </div>
+
+  <div class="quick-buttons">
+    <button onclick="presetFiveMinQuality()">5Min A/B Only</button>
+    <button onclick="presetNoTrade()">NO_TRADE Review</button>
+    <button onclick="presetBullish()">Bullish Only</button>
+    <button onclick="presetBearish()">Bearish Only</button>
+  </div>
+
+  <div class="status-row">
     <span id="status" class="neutral">Loading...</span>
+    <span id="filterStatus">Showing 0 rows</span>
   </div>
 
   <div class="grid">
@@ -4414,21 +4532,21 @@ def performance_dashboard():
       <div id="totalOutcomes" class="value">-</div>
     </div>
     <div class="card">
+      <div class="label">Filtered Rows</div>
+      <div id="filteredRows" class="value neutral">-</div>
+    </div>
+    <div class="card">
       <div class="label">Best Avg Favorable</div>
       <div id="bestFav" class="value good">-</div>
     </div>
     <div class="card">
-      <div class="label">Worst Invalidation</div>
-      <div id="worstInvalidation" class="value bad">-</div>
-    </div>
-    <div class="card">
-      <div class="label">Best Timeframe</div>
-      <div id="bestTimeframe" class="value neutral">-</div>
+      <div class="label">Best Edge</div>
+      <div id="bestEdge" class="value good">-</div>
     </div>
   </div>
 
   <div id="empty" class="empty" style="display:none;">
-    No performance logs yet. Let the chart run during market hours, then refresh this page.
+    No performance logs yet, or no rows match the current filters. Let the chart run during market hours, then refresh this page.
   </div>
 
   <table id="table" style="display:none;">
@@ -4442,17 +4560,30 @@ def performance_dashboard():
         <th>Count</th>
         <th>Avg Favorable</th>
         <th>Avg Adverse</th>
-        <th>Invalidation Rate</th>
+        <th>Edge</th>
+        <th>Invalidation</th>
       </tr>
     </thead>
     <tbody id="tbody"></tbody>
   </table>
 
   <div class="footer">
-    Tip: Favorable/adverse are stock-price movement values, not option-contract profit/loss.
+    Tip: Favorable/adverse are stock-price movement values, not option-contract profit/loss. Use count before trusting a result.
   </div>
 
   <script>
+    let rawSummary = [];
+    let rawData = null;
+
+    const gradeRank = {
+      "A+": 5,
+      "A": 4,
+      "B": 3,
+      "C": 2,
+      "NO_TRADE": 1,
+      "-": 0
+    };
+
     function fmtNum(value) {
       if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
       return Number(value).toFixed(3).replace(/\.?0+$/, "");
@@ -4470,24 +4601,155 @@ def performance_dashboard():
       return "neutral";
     }
 
-    function bestTimeframe(summary) {
-      const buckets = {};
-      for (const row of summary) {
-        const tf = row.timeframe || "unknown";
-        if (!buckets[tf]) buckets[tf] = { count: 0, fav: 0, adv: 0 };
-        buckets[tf].count += row.count || 0;
-        buckets[tf].fav += (row.avg_favorable_move || 0) * (row.count || 0);
-        buckets[tf].adv += (row.avg_adverse_move || 0) * (row.count || 0);
+    function uniqueValues(rows, key) {
+      return [...new Set(rows.map(row => row[key]).filter(v => v !== null && v !== undefined && v !== ""))]
+        .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+    }
+
+    function fillSelect(id, values, formatter = v => v) {
+      const select = document.getElementById(id);
+      const previous = select.value;
+      select.innerHTML = `<option value="ALL">All</option>`;
+
+      for (const value of values) {
+        const option = document.createElement("option");
+        option.value = String(value);
+        option.textContent = formatter(value);
+        select.appendChild(option);
       }
 
-      let best = null;
-      for (const [tf, item] of Object.entries(buckets)) {
-        const score = (item.fav - item.adv) / Math.max(1, item.count);
-        if (!best || score > best.score) {
-          best = { tf, score };
-        }
+      if ([...select.options].some(opt => opt.value === previous)) {
+        select.value = previous;
       }
-      return best ? `${best.tf}` : "-";
+    }
+
+    function hydrateFilters(summary) {
+      fillSelect("timeframeFilter", uniqueValues(summary, "timeframe"));
+      fillSelect("directionFilter", uniqueValues(summary, "direction"));
+      fillSelect("gradeFilter", uniqueValues(summary, "professional_grade"));
+      fillSelect("sourceFilter", uniqueValues(summary, "source"));
+      fillSelect("horizonFilter", uniqueValues(summary, "horizon_candles"), v => `${v} candles`);
+    }
+
+    function currentFilters() {
+      return {
+        timeframe: document.getElementById("timeframeFilter").value,
+        direction: document.getElementById("directionFilter").value,
+        grade: document.getElementById("gradeFilter").value,
+        source: document.getElementById("sourceFilter").value,
+        horizon: document.getElementById("horizonFilter").value,
+        minCount: Number(document.getElementById("minCountFilter").value || 0),
+        sortBy: document.getElementById("sortBy").value,
+      };
+    }
+
+    function rowEdge(row) {
+      return Number(row.avg_favorable_move || 0) - Number(row.avg_adverse_move || 0);
+    }
+
+    function applyFilters(summary) {
+      const f = currentFilters();
+
+      return summary.filter(row => {
+        if (f.timeframe !== "ALL" && String(row.timeframe) !== f.timeframe) return false;
+        if (f.direction !== "ALL" && String(row.direction) !== f.direction) return false;
+        if (f.grade !== "ALL" && String(row.professional_grade) !== f.grade) return false;
+        if (f.source !== "ALL" && String(row.source) !== f.source) return false;
+        if (f.horizon !== "ALL" && String(row.horizon_candles) !== f.horizon) return false;
+        if (Number(row.count || 0) < f.minCount) return false;
+        return true;
+      });
+    }
+
+    function sortRows(rows) {
+      const sortBy = document.getElementById("sortBy").value;
+      const copy = [...rows];
+
+      copy.sort((a, b) => {
+        if (sortBy === "avgFav") {
+          return Number(b.avg_favorable_move || 0) - Number(a.avg_favorable_move || 0);
+        }
+        if (sortBy === "avgAdv") {
+          return Number(a.avg_adverse_move || 0) - Number(b.avg_adverse_move || 0);
+        }
+        if (sortBy === "invalidRate") {
+          return Number(a.invalidation_rate || 0) - Number(b.invalidation_rate || 0);
+        }
+        if (sortBy === "count") {
+          return Number(b.count || 0) - Number(a.count || 0);
+        }
+        if (sortBy === "grade") {
+          return (gradeRank[b.professional_grade] || 0) - (gradeRank[a.professional_grade] || 0);
+        }
+
+        // Best edge default.
+        return rowEdge(b) - rowEdge(a);
+      });
+
+      return copy;
+    }
+
+    function renderCards(rows) {
+      document.getElementById("filteredRows").textContent = rows.length;
+
+      if (!rows.length) {
+        document.getElementById("bestFav").textContent = "-";
+        document.getElementById("bestEdge").textContent = "-";
+        return;
+      }
+
+      const bestFav = [...rows].sort((a, b) => Number(b.avg_favorable_move || 0) - Number(a.avg_favorable_move || 0))[0];
+      const bestEdge = [...rows].sort((a, b) => rowEdge(b) - rowEdge(a))[0];
+
+      document.getElementById("bestFav").textContent =
+        `${fmtNum(bestFav.avg_favorable_move)} ${bestFav.timeframe || ""}`;
+
+      document.getElementById("bestEdge").textContent =
+        `${fmtNum(rowEdge(bestEdge))} ${bestEdge.timeframe || ""}`;
+    }
+
+    function render() {
+      const filtered = sortRows(applyFilters(rawSummary));
+      const tbody = document.getElementById("tbody");
+      const empty = document.getElementById("empty");
+      const table = document.getElementById("table");
+
+      document.getElementById("filterStatus").textContent =
+        `Showing ${filtered.length} of ${rawSummary.length} grouped rows`;
+
+      renderCards(filtered);
+
+      if (!filtered.length) {
+        empty.style.display = "block";
+        table.style.display = "none";
+        tbody.innerHTML = "";
+        return;
+      }
+
+      empty.style.display = "none";
+      table.style.display = "table";
+      tbody.innerHTML = "";
+
+      for (const row of filtered) {
+        const tr = document.createElement("tr");
+        const grade = row.professional_grade || "-";
+        const edge = rowEdge(row);
+
+        tr.innerHTML = `
+          <td>${row.timeframe || "-"}</td>
+          <td>${row.horizon_candles || "-"} candles</td>
+          <td>${row.direction || "-"}</td>
+          <td><span class="pill ${gradeClass(grade)}">${grade}</span></td>
+          <td>${row.source || "-"}</td>
+          <td>${row.count || 0}</td>
+          <td class="good">${fmtNum(row.avg_favorable_move)}</td>
+          <td class="bad">${fmtNum(row.avg_adverse_move)}</td>
+          <td class="${edge >= 0 ? "good" : "bad"}">${fmtNum(edge)}</td>
+          <td>${pct(row.invalidation_rate)}</td>
+        `;
+
+        tbody.appendChild(tr);
+      }
     }
 
     async function loadData() {
@@ -4499,53 +4761,14 @@ def performance_dashboard():
       try {
         const res = await fetch(`/api/debug/setup-performance?limit=${limit}`, { cache: "no-store" });
         const data = await res.json();
-        const summary = data.summary || [];
+
+        rawData = data;
+        rawSummary = data.summary || [];
 
         document.getElementById("totalOutcomes").textContent = data.total_outcomes ?? 0;
 
-        if (!summary.length) {
-          document.getElementById("empty").style.display = "block";
-          document.getElementById("table").style.display = "none";
-          document.getElementById("bestFav").textContent = "-";
-          document.getElementById("worstInvalidation").textContent = "-";
-          document.getElementById("bestTimeframe").textContent = "-";
-          status.textContent = "No data yet";
-          return;
-        }
-
-        document.getElementById("empty").style.display = "none";
-        document.getElementById("table").style.display = "table";
-
-        const bestFav = [...summary].sort((a, b) => (b.avg_favorable_move || 0) - (a.avg_favorable_move || 0))[0];
-        const worstInv = [...summary].sort((a, b) => (b.invalidation_rate || 0) - (a.invalidation_rate || 0))[0];
-
-        document.getElementById("bestFav").textContent =
-          `${fmtNum(bestFav.avg_favorable_move)} ${bestFav.timeframe || ""}`;
-
-        document.getElementById("worstInvalidation").textContent =
-          `${pct(worstInv.invalidation_rate)} ${worstInv.timeframe || ""}`;
-
-        document.getElementById("bestTimeframe").textContent = bestTimeframe(summary);
-
-        const tbody = document.getElementById("tbody");
-        tbody.innerHTML = "";
-
-        for (const row of summary) {
-          const tr = document.createElement("tr");
-          const grade = row.professional_grade || "-";
-          tr.innerHTML = `
-            <td>${row.timeframe || "-"}</td>
-            <td>${row.horizon_candles || "-"} candles</td>
-            <td>${row.direction || "-"}</td>
-            <td><span class="pill ${gradeClass(grade)}">${grade}</span></td>
-            <td>${row.source || "-"}</td>
-            <td>${row.count || 0}</td>
-            <td class="good">${fmtNum(row.avg_favorable_move)}</td>
-            <td class="bad">${fmtNum(row.avg_adverse_move)}</td>
-            <td>${pct(row.invalidation_rate)}</td>
-          `;
-          tbody.appendChild(tr);
-        }
+        hydrateFilters(rawSummary);
+        render();
 
         status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
         status.className = "good";
@@ -4556,12 +4779,58 @@ def performance_dashboard():
       }
     }
 
+    function resetFilters() {
+      document.getElementById("timeframeFilter").value = "ALL";
+      document.getElementById("directionFilter").value = "ALL";
+      document.getElementById("gradeFilter").value = "ALL";
+      document.getElementById("sourceFilter").value = "ALL";
+      document.getElementById("horizonFilter").value = "ALL";
+      document.getElementById("minCountFilter").value = 0;
+      document.getElementById("sortBy").value = "bestEdge";
+      render();
+    }
+
+    function presetFiveMinQuality() {
+      resetFilters();
+      if ([...document.getElementById("timeframeFilter").options].some(o => o.value === "5Min")) {
+        document.getElementById("timeframeFilter").value = "5Min";
+      }
+      document.getElementById("sortBy").value = "grade";
+      render();
+    }
+
+    function presetNoTrade() {
+      resetFilters();
+      if ([...document.getElementById("gradeFilter").options].some(o => o.value === "NO_TRADE")) {
+        document.getElementById("gradeFilter").value = "NO_TRADE";
+      }
+      document.getElementById("sortBy").value = "count";
+      render();
+    }
+
+    function presetBullish() {
+      resetFilters();
+      if ([...document.getElementById("directionFilter").options].some(o => o.value === "bullish")) {
+        document.getElementById("directionFilter").value = "bullish";
+      }
+      render();
+    }
+
+    function presetBearish() {
+      resetFilters();
+      if ([...document.getElementById("directionFilter").options].some(o => o.value === "bearish")) {
+        document.getElementById("directionFilter").value = "bearish";
+      }
+      render();
+    }
+
     loadData();
     setInterval(loadData, 30000);
   </script>
 </body>
 </html>
     """
+
 
 
 @APP.route("/api/debug/setup-performance")
