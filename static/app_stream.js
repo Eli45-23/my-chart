@@ -38,6 +38,8 @@ const COLORS = {
   previousClose: "#b39ddb",
   resistance: "#ff9800",
   support: "#2196f3",
+  weakResistance: "#6d5a43",
+  weakSupport: "#40566b",
   supply: "#ff4d6d",
   demand: "#00c853",
   trigger: "#ffd600",
@@ -130,7 +132,7 @@ const ema20Series = chart.addLineSeries({
 let priceLines = [];
 
 function isLayerVisible(layer) {
-  const cleanModeHiddenLayers = ["sr", "liquiditySweeps", "clusters", "reactionZones"];
+  const cleanModeHiddenLayers = ["liquiditySweeps", "clusters", "reactionZones"];
   return layerState[layer] && !(cleanMode && cleanModeHiddenLayers.includes(layer));
 }
 
@@ -148,7 +150,7 @@ function updateCleanModeControl() {
   cleanModeToggle.textContent = `Clean Mode: ${cleanMode ? "On" : "Off"}`;
 
   toggleButtons.forEach((btn) => {
-    const suppressedLayers = ["sr", "weakZones", "liquiditySweeps", "clusters", "reactionZones"];
+    const suppressedLayers = ["weakZones", "liquiditySweeps", "clusters", "reactionZones"];
     const suppressed = cleanMode && suppressedLayers.includes(btn.dataset.layer);
     btn.classList.toggle("clean-mode-suppressed", suppressed);
     btn.title = suppressed ? "Hidden while Clean Mode is on" : "";
@@ -168,12 +170,12 @@ function clearPriceLines() {
   priceLines = [];
 }
 
-function addLevel(label, price, color, style = LightweightCharts.LineStyle.Solid, showLabel = true) {
+function addLevel(label, price, color, style = LightweightCharts.LineStyle.Solid, showLabel = true, lineWidth = 1) {
   if (price === null || price === undefined) return;
   const line = candleSeries.createPriceLine({
     price,
     color,
-    lineWidth: 1,
+    lineWidth,
     lineStyle: style,
     axisLabelVisible: showLabel,
     title: showLabel ? `${label} ${Number(price).toFixed(2)}` : "",
@@ -356,8 +358,8 @@ function updateLegend(data) {
     pill("VWAP", latestVWAP),
     pill("EMA9", latestEMA9),
     cleanMode ? "" : pill("EMA20", latestEMA20),
-    cleanMode ? "" : textPill(`Support: ${(latestPayload.support_resistance?.support || []).map(x => `${x.price.toFixed(2)} ${x.reliability_label || ""} ${x.reliability_score || ""}`).join(", ") || "none"}`),
-    cleanMode ? "" : textPill(`Resistance: ${(latestPayload.support_resistance?.resistance || []).map(x => `${x.price.toFixed(2)} ${x.reliability_label || ""} ${x.reliability_score || ""}`).join(", ") || "none"}`),
+    cleanMode ? "" : textPill(`Support: ${(latestPayload.support_resistance?.support || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""} ${x.quality_score ?? x.reliability_score ?? ""}`).join(", ") || "none"}`),
+    cleanMode ? "" : textPill(`Resistance: ${(latestPayload.support_resistance?.resistance || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""} ${x.quality_score ?? x.reliability_score ?? ""}`).join(", ") || "none"}`),
     cleanMode ? "" : textPill(`Reaction Zones 30m: ${[
       ...(latestPayload.structure_reactions?.resistance_watch || []).map(z => `Watch R ${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.score || ""}`),
       ...(latestPayload.structure_reactions?.support_watch || []).map(z => `Watch S ${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.score || ""}`),
@@ -438,13 +440,30 @@ function drawStaticLevels(data) {
 
   if (isLayerVisible("sr")) {
     const sr = data.support_resistance || {};
+    const visibleLevels = (levels) => cleanMode
+      ? (levels || []).filter(level => ["A", "B"].includes(level.quality_grade))
+      : (levels || []);
 
-    (sr.resistance || []).forEach((level, index) => {
-      addLevel(`R${index + 1} ${level.reliability_label || ""} ${level.reliability_score || ""}`, level.price, COLORS.resistance, LightweightCharts.LineStyle.Dashed);
+    visibleLevels(sr.resistance).forEach((level, index) => {
+      const weak = level.quality_grade === "WEAK";
+      addLevel(
+        `R${index + 1} ${level.quality_grade || level.reliability_label || ""} ${level.quality_score ?? level.reliability_score ?? ""}`,
+        level.price,
+        weak ? COLORS.weakResistance : COLORS.resistance,
+        weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed,
+        !weak
+      );
     });
 
-    (sr.support || []).forEach((level, index) => {
-      addLevel(`S${index + 1} ${level.reliability_label || ""} ${level.reliability_score || ""}`, level.price, COLORS.support, LightweightCharts.LineStyle.Dashed);
+    visibleLevels(sr.support).forEach((level, index) => {
+      const weak = level.quality_grade === "WEAK";
+      addLevel(
+        `S${index + 1} ${level.quality_grade || level.reliability_label || ""} ${level.quality_score ?? level.reliability_score ?? ""}`,
+        level.price,
+        weak ? COLORS.weakSupport : COLORS.support,
+        weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed,
+        !weak
+      );
     });
   }
 

@@ -152,7 +152,7 @@ def cluster_levels(levels, max_gap=0.08):
     return [{"price": round_price(sum(c) / len(c)), "touches": len(c)} for c in clusters]
 
 
-def detect_support_resistance(candles, current_price=None, lookback=3, max_levels=3):
+def detect_support_resistance(candles, current_price=None, lookback=3, max_levels=6):
     highs = []
     lows = []
 
@@ -588,9 +588,32 @@ def count_level_touches(level_price, candles, start_time=None):
     return touches
 
 
-def score_support_resistance_level(level, candles, current_price=None, side="support"):
+def level_quality_grade(score):
+    if score >= 80:
+        return "A"
+    if score >= 65:
+        return "B"
+    if score >= 50:
+        return "C"
+    return "WEAK"
+
+
+def score_support_resistance_level(
+    level,
+    candles,
+    current_price=None,
+    side="support",
+    levels=None,
+    vwap=None,
+    supply_demand=None,
+    level_clusters=None,
+    atr14=None,
+):
     price = level.get("price")
     touches = int(level.get("touches", 0) or 0)
+    levels = levels or {}
+    supply_demand = supply_demand or {"demand": [], "supply": []}
+    level_clusters = level_clusters or {"clusters": []}
 
     # Add real touch count from candles, not only clustered swing count.
     real_touches = count_level_touches(price, candles)
@@ -598,82 +621,164 @@ def score_support_resistance_level(level, candles, current_price=None, side="sup
 
     reaction = reaction_after_level(price, candles, side)
     broken = level_was_broken(price, candles, side)
+    tolerance = max(0.03, (atr14 or 0) * 0.15, (price or 0) * 0.00025)
 
-    score = 0
-
-    # Touch count
-    if touches >= 3:
-        score += 30
+    touch_score = 0
+    if touches == 1:
+        touch_score = 10
     elif touches == 2:
-        score += 22
-    elif touches == 1:
-        score += 10
+        touch_score = 18
+    elif 3 <= touches <= 5:
+        touch_score = 25
+    elif touches > 5:
+        touch_score = max(8, 25 - (touches - 5) * 4)
 
-    # Reaction / follow-through
-    score += min(25, int(reaction["reaction_score"] * 0.25))
+    reaction_score = min(25, int(reaction["reaction_score"] * 0.25))
     if reaction["follow_through"]:
-        score += 15
+        reaction_score = min(25, reaction_score + 5)
 
-    # Distance: closer useful levels matter more, but do not overreward.
+    touch_indices = [
+        idx for idx, candle in enumerate(candles)
+        if candle["low"] - tolerance <= price <= candle["high"] + tolerance
+    ]
+    bars_since_touch = len(candles) - 1 - touch_indices[-1] if touch_indices else len(candles)
+    if bars_since_touch <= 5:
+        freshness_score = 15
+    elif bars_since_touch <= 15:
+        freshness_score = 11
+    elif bars_since_touch <= 35:
+        freshness_score = 6
+    else:
+        freshness_score = 2
+
+    confluence_labels = []
+    reference_levels = [
+        ("PMH", levels.get("pmh")),
+        ("PML", levels.get("pml")),
+        ("PDH", levels.get("pdh")),
+        ("PDL", levels.get("pdl")),
+        ("PDC", levels.get("pdc")),
+        ("VWAP", vwap),
+    ]
+    for label, reference_price in reference_levels:
+        if reference_price is not None and abs(price - reference_price) <= tolerance * 2:
+            confluence_labels.append(label)
+
+    for zone_side in ["demand", "supply"]:
+        for zone in supply_demand.get(zone_side, []) or []:
+            if any(
+                boundary is not None and abs(price - boundary) <= tolerance * 2
+                for boundary in [zone.get("low"), zone.get("high")]
+            ):
+                confluence_labels.append(zone_side.title())
+                break
+
+    for cluster in level_clusters.get("clusters", []) or []:
+        if cluster.get("low") is not None and cluster.get("high") is not None:
+            if cluster["low"] - tolerance <= price <= cluster["high"] + tolerance:
+                confluence_labels.append("Level cluster")
+                break
+
+    confluence_labels = list(dict.fromkeys(confluence_labels))
+    confluence_score = min(20, len(confluence_labels) * 7)
+
     bps = distance_bps(price, current_price) if current_price else None
+    distance_score = 0
     if bps is not None:
         if bps <= 40:
-            score += 15
+            distance_score = 10
         elif bps <= 90:
-            score += 10
+            distance_score = 7
         elif bps <= 160:
-            score += 5
+            distance_score = 4
 
-    # Session confidence from the most recent touch
-    score += 5
-
+    chopped_through = sum(
+        1 for candle in candles
+        if candle["low"] < price - tolerance and candle["high"] > price + tolerance
+    )
+    cleanliness_score = max(0, 15 - chopped_through * 3)
     if broken:
-        score -= 35
+        cleanliness_score = 0
 
-    score = max(0, min(100, score))
+    score = touch_score + reaction_score + freshness_score + confluence_score + distance_score + cleanliness_score
+    if broken:
+        score -= 25
+    score = max(0, min(100, int(score)))
+    grade = level_quality_grade(score)
 
-    if score >= 80:
-        label = "Strong"
-    elif score >= 65:
-        label = "Valid"
-    elif score >= 50:
-        label = "Watch"
-    else:
-        label = "Weak"
+    reasons = [
+        f"{touches} clean touch{'es' if touches != 1 else ''}",
+        f"reaction {reaction['reaction_score']}/100",
+        f"freshness {freshness_score}/15",
+        f"cleanliness {cleanliness_score}/15",
+    ]
+    if confluence_labels:
+        reasons.append(f"confluence: {', '.join(confluence_labels)}")
+    if bps is not None:
+        reasons.append(f"{round(bps)} bps from current price")
+    if touches > 5:
+        reasons.append("many touches reduce cleanliness")
+    if broken:
+        reasons.append("level was broken")
 
     enhanced = dict(level)
     enhanced.update({
         "price": round_price(price),
         "touches": touches,
+        "touch_count": touches,
         "reaction_score": reaction["reaction_score"],
+        "freshness_score": freshness_score,
+        "confluence_score": confluence_score,
+        "cleanliness_score": cleanliness_score,
+        "quality_score": score,
+        "quality_grade": grade,
+        "quality_reasons": reasons,
         "follow_through": reaction["follow_through"],
         "broken": broken,
         "reliability_score": score,
-        "reliability_label": label,
-        "worth_showing": score >= 50 and not broken,
+        "reliability_label": grade,
+        "worth_showing": not broken,
+        "read_only": True,
     })
     return enhanced
 
 
-def filter_and_score_support_resistance(support_resistance, candles, current_price=None):
+def filter_and_score_support_resistance(
+    support_resistance,
+    candles,
+    current_price=None,
+    levels=None,
+    vwap=None,
+    supply_demand=None,
+    level_clusters=None,
+    atr14=None,
+):
     result = {"support": [], "resistance": []}
 
     for s in support_resistance.get("support", []) or []:
-        enhanced = score_support_resistance_level(s, candles, current_price=current_price, side="support")
+        enhanced = score_support_resistance_level(
+            s, candles, current_price=current_price, side="support", levels=levels, vwap=vwap,
+            supply_demand=supply_demand, level_clusters=level_clusters, atr14=atr14,
+        )
         if enhanced["worth_showing"]:
             result["support"].append(enhanced)
 
     for r in support_resistance.get("resistance", []) or []:
-        enhanced = score_support_resistance_level(r, candles, current_price=current_price, side="resistance")
+        enhanced = score_support_resistance_level(
+            r, candles, current_price=current_price, side="resistance", levels=levels, vwap=vwap,
+            supply_demand=supply_demand, level_clusters=level_clusters, atr14=atr14,
+        )
         if enhanced["worth_showing"]:
             result["resistance"].append(enhanced)
 
-    result["support"] = sorted(result["support"], key=lambda x: (-x["reliability_score"], abs((current_price or x["price"]) - x["price"])))[:3]
-    result["resistance"] = sorted(result["resistance"], key=lambda x: (-x["reliability_score"], abs((current_price or x["price"]) - x["price"])))[:3]
+    result["support"] = sorted(result["support"], key=lambda x: (-x["quality_score"], abs((current_price or x["price"]) - x["price"])))[:6]
+    result["resistance"] = sorted(result["resistance"], key=lambda x: (-x["quality_score"], abs((current_price or x["price"]) - x["price"])))[:6]
 
     result["meta"] = {
-        "rule": "2+ touches preferred; 1-touch levels need reaction/confluence; broken levels hidden",
-        "min_score_to_show": 50,
+        "rule": "Weighted level quality: touches, reaction, freshness, confluence, distance, and cleanliness",
+        "quality_grades": {"A": "80-100", "B": "65-79", "C": "50-64", "WEAK": "below 50"},
+        "broken_levels_hidden": True,
+        "read_only": True,
     }
 
     return result
@@ -2152,6 +2257,7 @@ def strict_trade_quality_grade(setup, professional_context):
     structure_confirmed = bool(setup.get("structure_confirmed"))
     volume_confirmed = bool(setup.get("volume_confirmed"))
     market_aligned = bool(setup.get("market_aligned"))
+    level_quality_grade_value = setup.get("level_quality_grade")
 
     spy_agrees = trend_label_matches_direction(spy_trend, direction)
     qqq_agrees = trend_label_matches_direction(qqq_trend, direction)
@@ -2179,6 +2285,8 @@ def strict_trade_quality_grade(setup, professional_context):
         warnings.append("AAPL trend filter not confirmed.")
     if not volume_confirmed:
         warnings.append("Volume not confirmed.")
+    if setup.get("kind") in {"support", "resistance"} and level_quality_grade_value == "WEAK":
+        warnings.append("Support/resistance level quality is weak.")
 
     hard_no_trade = (
         status == "INVALIDATED"
@@ -2251,8 +2359,15 @@ def strict_trade_quality_grade(setup, professional_context):
         score -= 8
     if regime == "RANGE":
         score -= 4
-
     score = max(0, min(100, int(score)))
+
+    if setup.get("kind") in {"support", "resistance"}:
+        if level_quality_grade_value == "A":
+            score = min(100, score + 8)
+        elif level_quality_grade_value == "B":
+            score = min(100, score + 4)
+        elif level_quality_grade_value == "WEAK":
+            score = max(0, score - 12)
 
     if hard_no_trade:
         grade = "NO_TRADE"
@@ -2288,6 +2403,8 @@ def strict_trade_quality_grade(setup, professional_context):
             "qqq_trend": qqq_trend,
             "spy_agrees": spy_agrees,
             "qqq_agrees": qqq_agrees,
+            "level_quality_grade": level_quality_grade_value,
+            "level_quality_score": setup.get("level_quality_score"),
         },
         "read_only": True,
     }
@@ -2356,7 +2473,7 @@ def build_risk_reward_targets(direction, entry, levels=None, support_resistance=
 
     candidates = []
 
-    def add(price, label, kind):
+    def add(price, label, kind, quality_grade=None, quality_score=None):
         if price is None:
             return
 
@@ -2373,6 +2490,8 @@ def build_risk_reward_targets(direction, entry, levels=None, support_resistance=
             "price": price,
             "label": label,
             "kind": kind,
+            "quality_grade": quality_grade,
+            "quality_score": quality_score,
         })
 
     if direction == "bullish":
@@ -2381,7 +2500,7 @@ def build_risk_reward_targets(direction, entry, levels=None, support_resistance=
         add(levels.get("pdc"), "PDC", "previous_day_close")
 
         for idx, level in enumerate(support_resistance.get("resistance", []) or []):
-            add(level.get("price"), f"R{idx + 1}", "resistance")
+            add(level.get("price"), f"R{idx + 1}", "resistance", level.get("quality_grade"), level.get("quality_score"))
 
         for idx, zone in enumerate(supply_demand.get("supply", []) or []):
             add(zone.get("low"), f"Supply {idx + 1}", "supply")
@@ -2395,7 +2514,7 @@ def build_risk_reward_targets(direction, entry, levels=None, support_resistance=
         add(levels.get("pdc"), "PDC", "previous_day_close")
 
         for idx, level in enumerate(support_resistance.get("support", []) or []):
-            add(level.get("price"), f"S{idx + 1}", "support")
+            add(level.get("price"), f"S{idx + 1}", "support", level.get("quality_grade"), level.get("quality_score"))
 
         for idx, zone in enumerate(supply_demand.get("demand", []) or []):
             add(zone.get("high"), f"Demand {idx + 1}", "demand")
@@ -2410,8 +2529,16 @@ def build_risk_reward_targets(direction, entry, levels=None, support_resistance=
         if key not in unique:
             unique[key] = candidate
 
+    target_candidates = list(unique.values())
+    preferred_candidates = [
+        candidate for candidate in target_candidates
+        if candidate.get("kind") not in {"support", "resistance"} or candidate.get("quality_grade") != "WEAK"
+    ]
+    if preferred_candidates:
+        target_candidates = preferred_candidates
+
     return sorted(
-        unique.values(),
+        target_candidates,
         key=lambda candidate: candidate["price"],
         reverse=direction == "bearish",
     )
@@ -2542,6 +2669,8 @@ def calculate_setup_risk_reward(
         warnings.append("opposing level too close")
     if not opposing_levels:
         warnings.append("no clean target found")
+    if targets and targets[0].get("quality_grade") == "WEAK":
+        warnings.append("Target level is weak.")
     if setup.get("professional_grade") == "NO_TRADE":
         warnings.append("setup is NO_TRADE")
     if setup.get("status") != "CONFIRMED":
@@ -2628,7 +2757,7 @@ def build_confirmation_level_candidates(levels=None, support_resistance=None, su
 
     candidates = []
 
-    def add(side, price, name, kind, low=None, high=None, confidence=None):
+    def add(side, price, name, kind, low=None, high=None, confidence=None, quality_score=None, quality_grade=None, quality_reasons=None):
         if price is None:
             return
         candidates.append({
@@ -2639,6 +2768,9 @@ def build_confirmation_level_candidates(levels=None, support_resistance=None, su
             "low": round_price(low if low is not None else price),
             "high": round_price(high if high is not None else price),
             "confidence": confidence or "watch",
+            "quality_score": quality_score,
+            "quality_grade": quality_grade,
+            "quality_reasons": quality_reasons or [],
         })
 
     add("upside", levels.get("pmh"), "PMH", "premarket_high")
@@ -2647,10 +2779,16 @@ def build_confirmation_level_candidates(levels=None, support_resistance=None, su
     add("downside", levels.get("pdl"), "PDL", "previous_day_low")
 
     for idx, r in enumerate(support_resistance.get("resistance", []) or []):
-        add("upside", r.get("price"), f"R{idx + 1}", "resistance", confidence=r.get("reliability_label"))
+        add(
+            "upside", r.get("price"), f"R{idx + 1}", "resistance", confidence=r.get("reliability_label"),
+            quality_score=r.get("quality_score"), quality_grade=r.get("quality_grade"), quality_reasons=r.get("quality_reasons"),
+        )
 
     for idx, s in enumerate(support_resistance.get("support", []) or []):
-        add("downside", s.get("price"), f"S{idx + 1}", "support", confidence=s.get("reliability_label"))
+        add(
+            "downside", s.get("price"), f"S{idx + 1}", "support", confidence=s.get("reliability_label"),
+            quality_score=s.get("quality_score"), quality_grade=s.get("quality_grade"), quality_reasons=s.get("quality_reasons"),
+        )
 
     for idx, z in enumerate(supply_demand.get("supply", []) or []):
         add("upside", z.get("high"), f"Supply {idx + 1}", "supply", low=z.get("low"), high=z.get("high"), confidence=z.get("label"))
@@ -2825,6 +2963,9 @@ def detect_confirmation_setups(candles, current_price=None, levels=None, support
                 "level_price": round_price(price),
                 "level_low": level.get("low"),
                 "level_high": level.get("high"),
+                "level_quality_score": level.get("quality_score"),
+                "level_quality_grade": level.get("quality_grade"),
+                "level_quality_reasons": level.get("quality_reasons", []),
                 "interaction": interaction,
                 "trigger": trigger,
                 "invalidation": invalidation,
@@ -3023,11 +3164,23 @@ def chart_data():
                 regular_candles.append(c)
 
         indicators_source = regular_candles if regular_candles else candles
+        indicators = {
+            "vwap": calc_vwap(indicators_source),
+            "ema9": calc_ema(indicators_source, 9),
+            "ema20": calc_ema(indicators_source, 20),
+            "atr14": calc_atr14(indicators_source, 14),
+        }
+        latest_vwap = latest_indicator_value(indicators.get("vwap"))
+        latest_atr14 = latest_indicator_value(indicators.get("atr14"))
+
         raw_support_resistance = detect_support_resistance(indicators_source, current_price=current_price)
         support_resistance = filter_and_score_support_resistance(
             raw_support_resistance,
             indicators_source,
             current_price=current_price,
+            levels=levels,
+            vwap=latest_vwap,
+            atr14=latest_atr14,
         )
 
         structure_reactions = detect_structure_reaction_zones(
@@ -3086,12 +3239,35 @@ def chart_data():
             liquidity_sweeps=liquidity_sweeps,
         )
 
-        indicators = {
-            "vwap": calc_vwap(indicators_source),
-            "ema9": calc_ema(indicators_source, 9),
-            "ema20": calc_ema(indicators_source, 20),
-            "atr14": calc_atr14(indicators_source, 14),
-        }
+        support_resistance = filter_and_score_support_resistance(
+            raw_support_resistance,
+            indicators_source,
+            current_price=current_price,
+            levels=levels,
+            vwap=latest_vwap,
+            supply_demand=supply_demand,
+            level_clusters=level_clusters,
+            atr14=latest_atr14,
+        )
+
+        raw_liquidity_sweeps = build_liquidity_sweep_zones(
+            current_price,
+            levels=levels,
+            support_resistance=support_resistance,
+            supply_demand=supply_demand,
+        )
+        liquidity_sweeps = filter_reliable_liquidity_sweeps(
+            raw_liquidity_sweeps,
+            support_resistance=support_resistance,
+            supply_demand=supply_demand,
+        )
+        level_clusters = build_level_clusters(
+            current_price,
+            levels=levels,
+            support_resistance=support_resistance,
+            supply_demand=supply_demand,
+            liquidity_sweeps=liquidity_sweeps,
+        )
 
         confirmation_setups = detect_confirmation_setups(
             indicators_source,
