@@ -6060,22 +6060,39 @@ def performance_dashboard():
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>AAPL Setup Performance Dashboard</title>
+  <title>AAPL Professional Trading Dashboard</title>
   <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b10;
+      --panel: #101722;
+      --panel-raised: #121c29;
+      --border: #273549;
+      --text: #e9eef6;
+      --muted: #8e9caf;
+      --accent: #6da8ff;
+      --good: #70d99d;
+      --warn: #e7bd68;
+      --bad: #ef8585;
+    }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
-      padding: 24px;
-      background: #080b10;
-      color: #e8edf5;
-      font-family: Arial, Helvetica, sans-serif;
+      padding: 28px 30px 34px;
+      background: radial-gradient(circle at 50% -18%, #162339 0, var(--bg) 38%);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-width: 1100px;
     }
     h1 {
-      margin: 0 0 8px;
-      font-size: 26px;
+      margin: 0 0 7px;
+      font-size: 28px;
+      letter-spacing: -.03em;
     }
     .sub {
-      color: #9aa7b8;
-      margin-bottom: 22px;
+      color: var(--muted);
+      margin-bottom: 24px;
+      font-size: 13px;
     }
     .grid {
       display: grid;
@@ -6084,14 +6101,14 @@ def performance_dashboard():
       margin-bottom: 20px;
     }
     .card {
-      background: #111722;
-      border: 1px solid #263244;
+      background: linear-gradient(145deg, #121b28, #0e151f);
+      border: 1px solid var(--border);
       border-radius: 12px;
-      padding: 14px;
-      box-shadow: 0 8px 22px rgba(0,0,0,.22);
+      padding: 15px;
+      box-shadow: 0 10px 24px rgba(0,0,0,.18);
     }
     .label {
-      color: #9aa7b8;
+      color: var(--muted);
       font-size: 12px;
       text-transform: uppercase;
       letter-spacing: .04em;
@@ -6102,23 +6119,46 @@ def performance_dashboard():
       font-weight: bold;
     }
     .warn {
-      color: #f6c76f;
+      color: var(--warn);
     }
     .good {
-      color: #76e39a;
+      color: var(--good);
     }
     .bad {
-      color: #ff8b8b;
+      color: var(--bad);
     }
     .neutral {
       color: #b7c4d8;
+    }
+    .filter-panel {
+      margin: 0 0 18px;
+      padding: 15px;
+      background: rgba(14, 21, 31, .88);
+      border: 1px solid var(--border);
+      border-radius: 13px;
+    }
+    .panel-heading {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 12px;
+    }
+    .panel-heading h2 {
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: -.01em;
+    }
+    .panel-heading span {
+      color: var(--muted);
+      font-size: 11px;
     }
     .controls {
       display: grid;
       grid-template-columns: repeat(6, minmax(130px, 1fr));
       gap: 10px;
       align-items: end;
-      margin-bottom: 14px;
+      margin-bottom: 11px;
     }
     .control {
       display: flex;
@@ -6126,23 +6166,26 @@ def performance_dashboard():
       gap: 5px;
     }
     .control label {
-      color: #9aa7b8;
+      color: var(--muted);
       font-size: 11px;
       text-transform: uppercase;
       letter-spacing: .04em;
     }
     button, select, input {
-      background: #151e2c;
-      color: #e8edf5;
-      border: 1px solid #314057;
-      border-radius: 8px;
-      padding: 9px 11px;
+      background: #121c29;
+      color: var(--text);
+      border: 1px solid #304158;
+      border-radius: 7px;
+      padding: 8px 10px;
     }
     button {
       cursor: pointer;
+      font-weight: 650;
+      transition: background .15s ease, border-color .15s ease, opacity .15s ease;
     }
     button:hover, select:hover {
-      background: #1b2738;
+      background: #1a2a3d;
+      border-color: #526c8b;
     }
     .status-row {
       display: flex;
@@ -6150,14 +6193,14 @@ def performance_dashboard():
       align-items: center;
       margin: 10px 0 16px;
       flex-wrap: wrap;
-      color: #9aa7b8;
+      color: var(--muted);
       font-size: 13px;
     }
     table {
       width: 100%;
       border-collapse: collapse;
       background: #0e1420;
-      border: 1px solid #263244;
+      border: 1px solid var(--border);
       border-radius: 12px;
       overflow: hidden;
     }
@@ -6192,29 +6235,39 @@ def performance_dashboard():
       font-size: 12px;
     }
     .empty {
-      padding: 24px;
-      background: #111722;
-      border: 1px solid #263244;
+      padding: 38px 24px;
+      background: linear-gradient(145deg, #111a26, #0c121b);
+      border: 1px solid var(--border);
       border-radius: 12px;
-      color: #9aa7b8;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.55;
+    }
+    .empty strong {
+      display: block;
+      color: #d9e2ee;
+      font-size: 15px;
+      margin-bottom: 5px;
     }
     .quick-buttons {
       display: flex;
       gap: 8px;
       flex-wrap: wrap;
-      margin-bottom: 14px;
+      margin: 0;
     }
     .quick-buttons button {
-      padding: 7px 10px;
+      padding: 6px 9px;
       font-size: 12px;
+      background: transparent;
+      color: #9fb0c5;
     }
     .ai-panel {
-      background: #0e1622;
-      border: 1px solid #334963;
-      border-radius: 14px;
-      padding: 18px;
-      margin-bottom: 22px;
-      box-shadow: 0 10px 28px rgba(0,0,0,.25);
+      background: linear-gradient(145deg, rgba(17, 29, 43, .98), rgba(10, 17, 27, .98));
+      border: 1px solid #36506e;
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 24px;
+      box-shadow: 0 16px 36px rgba(0,0,0,.28), inset 0 1px rgba(255,255,255,.025);
     }
     .ai-panel-header {
       display: flex;
@@ -6226,19 +6279,31 @@ def performance_dashboard():
     .ai-panel h2 {
       margin: 0;
       font-size: 20px;
+      letter-spacing: -.02em;
+    }
+    #aiStatus {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 5px 9px;
+      border: 1px solid #34465e;
+      border-radius: 999px;
+      background: #111b29;
+      font-size: 11px;
+      font-weight: 700;
     }
     .ai-safety {
-      color: #f6c76f;
-      font-size: 12px;
-      margin: 8px 0 14px;
+      color: #8493a7;
+      font-size: 11px;
+      margin: 8px 0 15px;
     }
     .ai-recommendation {
-      color: #9aa7b8;
+      color: var(--muted);
       font-size: 12px;
       margin: -6px 0 14px;
     }
     .ai-recommendation.active {
-      color: #f6c76f;
+      color: var(--warn);
       font-weight: bold;
     }
     .ai-controls {
@@ -6258,7 +6323,7 @@ def performance_dashboard():
       text-transform: uppercase;
     }
     .ai-review {
-      margin-top: 14px;
+      margin-top: 18px;
       display: none;
     }
     .ai-review.visible {
@@ -6276,38 +6341,38 @@ def performance_dashboard():
       gap: 10px;
     }
     .ai-section {
-      background: #111b29;
-      border: 1px solid #29394e;
-      border-radius: 10px;
-      padding: 12px;
+      background: rgba(16, 26, 39, .9);
+      border: 1px solid #2a3b51;
+      border-radius: 11px;
+      padding: 13px;
     }
     .ai-section h3 {
       margin: 0 0 7px;
-      color: #aebbd0;
+      color: #91a3b9;
       font-size: 12px;
       text-transform: uppercase;
       letter-spacing: .04em;
     }
     .ai-section p {
       margin: 0;
-      line-height: 1.45;
+      line-height: 1.55;
       white-space: pre-wrap;
     }
     .ai-section ul {
       margin: 0;
       padding-left: 18px;
-      line-height: 1.45;
+      line-height: 1.55;
     }
     .ai-decision {
       font-size: 22px;
       font-weight: bold;
     }
-    .ai-decision.plan-ready { color: #76e39a; }
-    .ai-decision.watch { color: #f6c76f; }
+    .ai-decision.plan-ready { color: var(--good); }
+    .ai-decision.watch { color: #80b8ed; }
     .ai-decision.wait { color: #b7c4d8; }
-    .ai-decision.avoid { color: #ff8b8b; }
-    .ai-marker-allowed { color: #76e39a; }
-    .ai-marker-blocked { color: #ff8b8b; }
+    .ai-decision.avoid { color: var(--bad); }
+    .ai-marker-allowed { color: var(--good); }
+    .ai-marker-blocked { color: #b7c4d8; }
     @media (max-width: 1000px) {
       .grid {
         grid-template-columns: repeat(2, minmax(140px, 1fr));
@@ -6322,9 +6387,9 @@ def performance_dashboard():
   </style>
 </head>
 <body>
-  <h1>AAPL Setup Performance Dashboard</h1>
+  <h1>AAPL Professional Trading Dashboard</h1>
   <div class="sub">
-    Read-only review of logged chart setups. These are not executed trades.
+    Read-only setup intelligence, AI-assisted chart review, and measured performance context.
   </div>
 
   <section class="ai-panel" aria-labelledby="aiReviewTitle">
@@ -6378,7 +6443,12 @@ def performance_dashboard():
     </div>
   </section>
 
-  <div class="controls">
+  <section class="filter-panel" aria-labelledby="performanceFiltersTitle">
+    <div class="panel-heading">
+      <h2 id="performanceFiltersTitle">Performance Filters</h2>
+      <span>Refine logged setup outcomes</span>
+    </div>
+    <div class="controls">
     <div class="control">
       <label>Log Limit</label>
       <select id="limit" onchange="loadData()">
@@ -6451,14 +6521,15 @@ def performance_dashboard():
       <label>Reset</label>
       <button onclick="resetFilters()">Clear Filters</button>
     </div>
-  </div>
+    </div>
 
-  <div class="quick-buttons">
-    <button onclick="presetFiveMinQuality()">5Min A/B Only</button>
-    <button onclick="presetNoTrade()">NO_TRADE Review</button>
-    <button onclick="presetBullish()">Bullish Only</button>
-    <button onclick="presetBearish()">Bearish Only</button>
-  </div>
+    <div class="quick-buttons">
+      <button onclick="presetFiveMinQuality()">5Min A/B Only</button>
+      <button onclick="presetNoTrade()">NO_TRADE Review</button>
+      <button onclick="presetBullish()">Bullish Only</button>
+      <button onclick="presetBearish()">Bearish Only</button>
+    </div>
+  </section>
 
   <div class="status-row">
     <span id="status" class="neutral">Loading...</span>
@@ -6485,7 +6556,8 @@ def performance_dashboard():
   </div>
 
   <div id="empty" class="empty" style="display:none;">
-    No performance logs yet, or no rows match the current filters. Let the chart run during market hours, then refresh this page.
+    <strong>No performance data matches this view</strong>
+    No logs may be available yet, or the current filters are too narrow. Let the chart run during market hours, then refresh this page.
   </div>
 
   <table id="table" style="display:none;">

@@ -4,6 +4,7 @@ const statusEl = document.getElementById("status");
 const errorEl = document.getElementById("error");
 const countdownEl = document.getElementById("countdown");
 const streamStatusEl = document.getElementById("streamStatus");
+const chartEmptyEl = document.getElementById("chartEmpty");
 const tfButtons = document.querySelectorAll(".tf-btn");
 const toggleButtons = document.querySelectorAll(".toggle-btn[data-layer]");
 const cleanModeToggle = document.getElementById("cleanModeToggle");
@@ -349,8 +350,24 @@ function addReactionZone(label, zone, color) {
   addLevel(rangeLabel, mid, color, LightweightCharts.LineStyle.Dashed, true);
 }
 
-function textPill(text) {
-  return `<span class="pill">${text}</span>`;
+function textPill(text, tone = "") {
+  return `<span class="pill ${tone}">${text}</span>`;
+}
+
+function legendGroup(title, items, className = "") {
+  return `<section class="legend-group ${className}"><span class="legend-group-title">${title}</span><div class="legend-pills">${items.filter(Boolean).join("")}</div></section>`;
+}
+
+function warningTone(text) {
+  const value = String(text || "").toUpperCase();
+  if (value.includes("NO_TRADE") || value.includes("CHOP") || value.includes("FAILED") || value.includes("INVALIDATED")) return "alert";
+  if (value.includes("WAIT") || value.includes("WARNING") || value.includes("MIXED")) return "caution";
+  return "";
+}
+
+function updateChartEmptyState(candles) {
+  if (!chartEmptyEl) return;
+  chartEmptyEl.classList.toggle("visible", !Array.isArray(candles) || candles.length === 0);
 }
 
 function formatPrice(value) {
@@ -428,43 +445,63 @@ function updateLegend(data) {
     return score > bestScore ? setup : best;
   }, null);
 
-  legendEl.innerHTML = [
-    textPill(`Timeframe: ${activeTimeframe.replace("Min", "m")}`),
+  const sessionItems = [
+    textPill(`Timeframe ${activeTimeframe.replace("Min", "m")}`),
     pill("Current", latestPayload.current_price || trade?.price),
-    trade?.timestamp ? textPill(`Latest trade: ${new Date(trade.timestamp).toLocaleTimeString("en-US", { timeZone: "America/New_York" })} ET`) : "",
-    pill("PMH", levels.pmh),
-    pill("PML", levels.pml),
-    pill("PDH", levels.pdh),
-    pill("PDL", levels.pdl),
-    pill("PDC", levels.pdc),
-    pill("VWAP", latestVWAP),
-    pill("EMA9", latestEMA9),
-    cleanMode ? "" : pill("EMA20", latestEMA20),
-    cleanMode ? "" : textPill(`Support: ${(latestPayload.support_resistance?.support || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""} ${x.quality_score ?? x.reliability_score ?? ""}`).join(", ") || "none"}`),
-    cleanMode ? "" : textPill(`Resistance: ${(latestPayload.support_resistance?.resistance || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""} ${x.quality_score ?? x.reliability_score ?? ""}`).join(", ") || "none"}`),
-    cleanMode ? "" : textPill(`Reaction Zones 30m: ${[
+    trade?.timestamp ? textPill(`Trade ${new Date(trade.timestamp).toLocaleTimeString("en-US", { timeZone: "America/New_York" })} ET`) : "",
+    textPill(levels.premarket_window || "Premarket 04:00-09:30 ET"),
+  ];
+  const levelItems = [
+    pill("PMH", levels.pmh), pill("PML", levels.pml), pill("PDH", levels.pdh), pill("PDL", levels.pdl), pill("PDC", levels.pdc),
+    pill("VWAP", latestVWAP), pill("EMA9", latestEMA9), cleanMode ? "" : pill("EMA20", latestEMA20),
+    cleanMode ? "" : textPill(`Support ${(latestPayload.support_resistance?.support || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""}`).join(", ") || "none"}`),
+    cleanMode ? "" : textPill(`Resistance ${(latestPayload.support_resistance?.resistance || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""}`).join(", ") || "none"}`),
+    textPill(`Demand ${demandZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.zone_quality_grade || ""}`).join(", ") || "none"}`),
+    textPill(`Supply ${supplyZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.zone_quality_grade || ""}`).join(", ") || "none"}`),
+  ];
+  const researchItems = [
+    cleanMode ? "" : textPill(`Reaction Zones ${[
       ...(latestPayload.structure_reactions?.resistance_watch || []).map(z => `Watch R ${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.score || ""}`),
       ...(latestPayload.structure_reactions?.support_watch || []).map(z => `Watch S ${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.score || ""}`),
     ].join(" | ") || "none"}`),
-    textPill(`Demand: ${demandZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.zone_quality_grade || ""} ${z.zone_quality_score ?? ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
-    textPill(`Supply: ${supplyZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.zone_quality_grade || ""} ${z.zone_quality_score ?? ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
-    cleanMode ? "" : textPill(`Upside Sweep: ${(latestPayload.liquidity_sweeps?.upside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
-    cleanMode ? "" : textPill(`Downside Sweep: ${(latestPayload.liquidity_sweeps?.downside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
-    cleanMode ? "" : textPill(`Clusters: ${(latestPayload.level_clusters?.clusters || []).map(c => `${c.low.toFixed(2)}-${c.high.toFixed(2)} ${c.label || ""}`).join(" | ") || "none"}`),
-    textPill(`Pro Grade: ${latestPayload.professional_context?.professional_grade || "n/a"} | Market Confirmation: ${latestPayload.professional_context?.market_confirmation?.market_confirmation || latestPayload.professional_context?.market_alignment || "n/a"} ${latestPayload.professional_context?.market_confirmation?.market_confirmation_score ?? 0} | Regime: ${latestPayload.professional_context?.aapl?.regime?.regime || "n/a"} ${latestPayload.professional_context?.aapl?.regime?.regime_confidence || "LOW"} | Action: ${latestPayload.professional_context?.aapl?.regime?.action_label || "WAIT_FOR_BREAKOUT"} | Chop ${latestPayload.professional_context?.aapl?.regime?.chop_score ?? "n/a"}`),
-    textPill(`SPY Bias: ${latestPayload.professional_context?.market_confirmation?.spy_bias || "n/a"} ${latestPayload.professional_context?.market_confirmation?.spy_confirmation_score ?? 0} | QQQ Bias: ${latestPayload.professional_context?.market_confirmation?.qqq_bias || "n/a"} ${latestPayload.professional_context?.market_confirmation?.qqq_confirmation_score ?? 0}`),
-    textPill(`AAPL: ${latestPayload.professional_context?.aapl?.trend?.label || "n/a"} | RVOL ${latestPayload.professional_context?.aapl?.rvol || "n/a"}x | ATR14 ${latestPayload.professional_context?.aapl?.atr14 || "n/a"} | Relative Strength ${latestPayload.professional_context?.market_confirmation?.aapl_relative_strength || latestPayload.professional_context?.aapl?.relative_strength || "n/a"}`),
-    textPill(`Warnings: ${(latestPayload.professional_context?.warnings || []).join(" | ") || "none"}`),
-    textPill(`Logger: setups +${latestPayload.setup_logging?.logged_setups ?? 0} | outcomes +${latestPayload.setup_logging?.outcomes_evaluated ?? 0}`),
-    textPill(`Trend Filter: ${latestPayload.confirmation_setups?.trend?.label || "n/a"} | Price ${latestPayload.confirmation_setups?.trend?.price?.toFixed?.(2) || "n/a"} | VWAP ${latestPayload.confirmation_setups?.trend?.vwap?.toFixed?.(2) || "n/a"} | EMA9 ${latestPayload.confirmation_setups?.trend?.ema9?.toFixed?.(2) || "n/a"} | EMA20 ${latestPayload.confirmation_setups?.trend?.ema20?.toFixed?.(2) || "n/a"}`),
-    textPill(`Setup Status: ${latestPayload.confirmation_setups?.status || "NO_SETUP"} | Stages: ${[...new Set(setups.map(s => s.confirmation_stage === "EARLY_CONFIRM" ? "EARLY" : (s.confirmation_stage || s.status)))].join(", ") || "none"}`),
-    textPill(`Best Setup: ${latestPayload.confirmation_setups?.best_grade || bestSetup?.professional_grade || "NO_TRADE"} / ${bestSetup?.professional_score ?? bestSetup?.score ?? 0}`),
-    textPill(`Setups: ${setups.map(s => `${s.professional_grade || ""} ${s.confirmation_stage === "EARLY_CONFIRM" ? "EARLY" : (s.confirmation_stage || s.status)} ${s.confirmation_score ?? 0} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.professional_score ?? s.score ?? 0} vol ${s.volume_ratio || "n/a"}x | ${formatRiskReward(s, !cleanMode)}`).join(" || ") || "none"}`),
-    textPill("Read-only labels: A+ / A / B / C / NO_TRADE and WATCH / EARLY / CONFIRMED / FAILED"),
-    textPill(levels.premarket_window || "Premarket: 04:00-09:30 ET"),
+    cleanMode ? "" : textPill(`Sweeps ${[...(latestPayload.liquidity_sweeps?.upside || []), ...(latestPayload.liquidity_sweeps?.downside || [])].length || "none"}`),
+    cleanMode ? "" : textPill(`Clusters ${(latestPayload.level_clusters?.clusters || []).length || "none"}`),
+  ];
+  const regime = latestPayload.professional_context?.aapl?.regime || {};
+  const marketItems = [
+    textPill(`Regime ${regime.regime || "n/a"} · ${regime.regime_confidence || "LOW"}`, warningTone(regime.regime)),
+    textPill(`Action ${regime.action_label || "WAIT_FOR_BREAKOUT"}`, warningTone(regime.action_label)),
+    textPill(`Market ${latestPayload.professional_context?.market_confirmation?.market_confirmation || latestPayload.professional_context?.market_alignment || "n/a"}`, warningTone(latestPayload.professional_context?.market_confirmation?.market_confirmation)),
+    textPill(`SPY ${latestPayload.professional_context?.market_confirmation?.spy_bias || "n/a"} · QQQ ${latestPayload.professional_context?.market_confirmation?.qqq_bias || "n/a"}`),
+    textPill(`AAPL ${latestPayload.professional_context?.aapl?.trend?.label || "n/a"} · RVOL ${latestPayload.professional_context?.aapl?.rvol || "n/a"}x · ATR14 ${latestPayload.professional_context?.aapl?.atr14 || "n/a"}`),
+  ];
+  const setupStatus = latestPayload.confirmation_setups?.status || "NO_SETUP";
+  const setupItems = [
+    textPill(`Pro Grade ${latestPayload.professional_context?.professional_grade || "n/a"}`, warningTone(latestPayload.professional_context?.professional_grade)),
+    textPill(`Setup ${setupStatus}`, warningTone(setupStatus)),
+    textPill(`Best ${latestPayload.confirmation_setups?.best_grade || bestSetup?.professional_grade || "NO_TRADE"} · ${bestSetup?.professional_score ?? bestSetup?.score ?? 0}`, warningTone(latestPayload.confirmation_setups?.best_grade || bestSetup?.professional_grade)),
+    textPill(`Trend Filter ${latestPayload.confirmation_setups?.trend?.label || "n/a"}`),
+    textPill(`Setups ${setups.map(s => `${s.professional_grade || ""} ${s.confirmation_stage === "EARLY_CONFIRM" ? "EARLY" : (s.confirmation_stage || s.status)} · ${formatRiskReward(s, !cleanMode)}`).join(" || ") || "none"}`, warningTone(setupStatus)),
+  ];
+  const warningText = (latestPayload.professional_context?.warnings || []).join(" | ") || "No active warnings";
+  const riskItems = [
+    textPill(warningText, warningText === "No active warnings" ? "" : "alert"),
+    textPill(`Chop ${regime.chop_score ?? "n/a"}`, Number(regime.chop_score || 0) >= 60 ? "alert" : ""),
+    textPill(`Logger setups +${latestPayload.setup_logging?.logged_setups ?? 0} · outcomes +${latestPayload.setup_logging?.outcomes_evaluated ?? 0}`),
+    textPill("Read-only · manual confirmation required"),
+  ];
+
+  legendEl.innerHTML = [
+    legendGroup("Session / Timeframe", sessionItems),
+    legendGroup("Key Levels", [...levelItems, ...researchItems]),
+    legendGroup("Market Context", marketItems),
+    legendGroup("Setup Quality", setupItems, "setup"),
+    legendGroup("Risk / Warnings", riskItems, "warnings"),
   ].join("");
 
-  streamStatusEl.textContent = stream.connected ? "Stream: connected" : `Stream: ${stream.error || "waiting"}`;
+  streamStatusEl.textContent = stream.connected ? "Stream connected" : `Stream ${stream.error || "waiting"}`;
+  streamStatusEl.classList.toggle("connected", Boolean(stream.connected));
+  streamStatusEl.classList.toggle("reconnecting", !stream.connected);
 }
 
 
@@ -619,6 +656,7 @@ async function loadInitialChart() {
   }
 
   candleSeries.setData(data.candles || []);
+  updateChartEmptyState(data.candles);
 
   const indicators = data.indicators || {};
   vwapSeries.setData(indicators.vwap || []);
@@ -649,6 +687,7 @@ function connectStream() {
 
     if (data.type === "live_candle" && data.candle) {
       candleSeries.update(data.candle);
+      updateChartEmptyState([data.candle]);
 
       latestPayload = {
         ...(latestPayload || {}),
@@ -681,6 +720,7 @@ async function reloadForTimeframe() {
   try {
     didInitialLoad = false;
     candleSeries.setData([]);
+    updateChartEmptyState([]);
     vwapSeries.setData([]);
     ema9Series.setData([]);
     ema20Series.setData([]);
@@ -691,6 +731,7 @@ async function reloadForTimeframe() {
   } catch (err) {
     errorEl.textContent = `Chart error: ${err.message}`;
     statusEl.textContent = "Error loading chart";
+    updateChartEmptyState([]);
   }
 }
 
