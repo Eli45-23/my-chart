@@ -2602,72 +2602,207 @@ def trend_label_matches_direction(trend_label, direction):
 
 def strict_trade_quality_grade(setup, professional_context):
     """
-    Strict read-only setup grading.
+    Strict read-only setup grading v2.
+
+    Uses:
+    - confirmation stage
+    - level / zone quality
+    - market regime
+    - SPY / QQQ market confirmation
+    - AAPL relative strength
+    - risk/reward grade
+    - trend / reclaim / structure / volume confirmations
 
     This does not create orders.
     It only scores whether the chart context is good enough to respect.
     """
+    professional_context = professional_context or {}
+    setup = setup or {}
+
     direction = setup.get("direction")
     status = setup.get("status")
-    confirmation_stage = setup.get("confirmation_stage", status)
-    confirmation_score = setup.get("confirmation_score")
     setup_score = setup.get("score") or 0
 
-    aapl_context = professional_context.get("aapl", {}) if professional_context else {}
-    spy_context = professional_context.get("spy", {}) if professional_context else {}
-    qqq_context = professional_context.get("qqq", {}) if professional_context else {}
+    confirmation_stage = setup.get("confirmation_stage") or status or "WATCH"
+    confirmation_score = setup.get("confirmation_score")
+    if confirmation_score is None:
+        confirmation_score = setup_score
 
-    regime = aapl_context.get("regime", {}).get("regime")
-    chop_score = aapl_context.get("regime", {}).get("chop_score")
-    regime_score = aapl_context.get("regime", {}).get("regime_score")
-    regime_confidence = aapl_context.get("regime", {}).get("regime_confidence")
-    action_label = aapl_context.get("regime", {}).get("action_label")
+    risk_reward = setup.get("risk_reward") or {}
+    rr_grade = risk_reward.get("rr_grade")
+    rr_2 = risk_reward.get("rr_2")
+    rr_1 = risk_reward.get("rr_1")
+
+    aapl_context = professional_context.get("aapl", {}) or {}
+    spy_context = professional_context.get("spy", {}) or {}
+    qqq_context = professional_context.get("qqq", {}) or {}
+
+    regime_obj = aapl_context.get("regime", {}) or {}
+    regime = regime_obj.get("regime")
+    chop_score = regime_obj.get("chop_score")
+    regime_confidence = regime_obj.get("regime_confidence")
+    action_label = regime_obj.get("action_label")
+
     aapl_rvol = aapl_context.get("rvol")
     atr14 = aapl_context.get("atr14")
-    market_alignment = professional_context.get("market_alignment") if professional_context else "UNKNOWN"
-    market_confirmation = professional_context.get("market_confirmation", {}) if professional_context else {}
-    market_confirmation_value = market_confirmation.get("market_confirmation", market_alignment)
-    market_confirmation_score = market_confirmation.get("market_confirmation_score", 0)
-    aapl_relative_strength = market_confirmation.get("aapl_relative_strength", aapl_context.get("relative_strength"))
-    no_trade_context = bool(professional_context.get("no_trade")) if professional_context else False
 
-    spy_trend = spy_context.get("trend", {}).get("label")
-    qqq_trend = qqq_context.get("trend", {}).get("label")
+    # Backward-compatible market fields.
+    old_market_alignment = professional_context.get("market_alignment")
+    market_confirmation_obj = (
+        professional_context.get("market_confirmation")
+        or professional_context.get("market_confirmation_engine")
+        or {}
+    )
+
+    market_confirmation = (
+        market_confirmation_obj.get("market_confirmation")
+        or professional_context.get("market_confirmation")
+        or old_market_alignment
+        or "UNKNOWN"
+    )
+
+    market_confirmation_score = (
+        market_confirmation_obj.get("market_confirmation_score")
+        or professional_context.get("market_confirmation_score")
+        or 0
+    )
+
+    spy_bias = (
+        market_confirmation_obj.get("spy_bias")
+        or professional_context.get("spy_bias")
+        or spy_context.get("bias")
+        or spy_context.get("trend", {}).get("label")
+    )
+
+    qqq_bias = (
+        market_confirmation_obj.get("qqq_bias")
+        or professional_context.get("qqq_bias")
+        or qqq_context.get("bias")
+        or qqq_context.get("trend", {}).get("label")
+    )
+
+    aapl_relative_strength = (
+        market_confirmation_obj.get("aapl_relative_strength")
+        or professional_context.get("aapl_relative_strength")
+        or "UNKNOWN"
+    )
 
     trend_confirmed = bool(setup.get("trend_confirmed"))
     reclaim_confirmed = bool(setup.get("reclaim_confirmed"))
     structure_confirmed = bool(setup.get("structure_confirmed"))
     volume_confirmed = bool(setup.get("volume_confirmed"))
     market_aligned = bool(setup.get("market_aligned"))
-    level_quality_grade_value = setup.get("level_quality_grade")
-    zone_quality_grade_value = setup.get("zone_quality_grade")
 
-    spy_agrees = trend_label_matches_direction(spy_trend, direction)
-    qqq_agrees = trend_label_matches_direction(qqq_trend, direction)
+    # Level / zone quality fields. These may exist on S/R setups, supply/demand
+    # setups, or enriched setup objects.
+    level_quality_grade = (
+        setup.get("quality_grade")
+        or setup.get("level_quality_grade")
+        or setup.get("sr_quality_grade")
+    )
+    level_quality_score = (
+        setup.get("quality_score")
+        or setup.get("level_quality_score")
+        or setup.get("sr_quality_score")
+    )
+
+    zone_quality_grade = (
+        setup.get("zone_quality_grade")
+        or setup.get("supply_demand_quality_grade")
+    )
+    zone_quality_score = (
+        setup.get("zone_quality_score")
+        or setup.get("supply_demand_quality_score")
+    )
+
+    source = str(setup.get("source") or "").lower()
+    kind = str(setup.get("kind") or "").lower()
+
+    uses_zone = (
+        "supply" in source
+        or "demand" in source
+        or kind in {"supply", "demand"}
+    )
+    uses_sr = (
+        "support" in source
+        or "resistance" in source
+        or kind in {"support", "resistance"}
+    )
+
+    active_quality_grade = zone_quality_grade if uses_zone else level_quality_grade
+    active_quality_score = zone_quality_score if uses_zone else level_quality_score
+
+    if active_quality_grade is None:
+        active_quality_grade = "UNKNOWN"
+
+    def bias_matches_setup(bias, setup_direction):
+        if setup_direction == "bullish":
+            return bias in {"BULLISH", "UPTREND", "STRONG_BULLISH"}
+        if setup_direction == "bearish":
+            return bias in {"BEARISH", "DOWNTREND", "STRONG_BEARISH"}
+        return False
+
+    def bias_opposes_setup(bias, setup_direction):
+        if setup_direction == "bullish":
+            return bias in {"BEARISH", "DOWNTREND", "STRONG_BEARISH"}
+        if setup_direction == "bearish":
+            return bias in {"BULLISH", "UPTREND", "STRONG_BULLISH"}
+        return False
+
+    market_agrees = bias_matches_setup(market_confirmation, direction)
+    market_opposes = bias_opposes_setup(market_confirmation, direction)
+
+    spy_agrees = bias_matches_setup(spy_bias, direction)
+    qqq_agrees = bias_matches_setup(qqq_bias, direction)
+
+    spy_opposes = bias_opposes_setup(spy_bias, direction)
+    qqq_opposes = bias_opposes_setup(qqq_bias, direction)
+
+    relative_strength_good = (
+        (direction == "bullish" and aapl_relative_strength == "STRONG")
+        or (direction == "bearish" and aapl_relative_strength == "WEAK")
+    )
+
+    relative_strength_bad = (
+        (direction == "bullish" and aapl_relative_strength == "WEAK")
+        or (direction == "bearish" and aapl_relative_strength == "STRONG")
+    )
 
     warnings = []
 
-    # Hard NO_TRADE conditions.
-    if confirmation_stage == "FAILED":
-        warnings.append("Confirmation stage failed.")
-    elif confirmation_stage != "CONFIRMED":
-        warnings.append(f"Confirmation stage is {confirmation_stage}.")
-    if status == "INVALIDATED":
-        warnings.append("Setup already invalidated.")
-    if no_trade_context:
+    # Hard reject / strong downgrade conditions.
+    if status == "INVALIDATED" or confirmation_stage == "FAILED":
+        warnings.append("Setup failed or invalidated.")
+    if professional_context.get("no_trade"):
         warnings.append("Professional context says no trade.")
     if regime == "CHOP":
         warnings.append("AAPL is in chop.")
-    if chop_score is not None and chop_score >= 70:
-        warnings.append("Chop score too high.")
     if action_label == "NO_NEW_TRADES":
         warnings.append("Market regime says no new trades.")
     if action_label == "WAIT_FOR_BREAKOUT":
         warnings.append("Market regime says wait for breakout.")
-    if aapl_rvol is not None and aapl_rvol < 0.5:
-        warnings.append("AAPL relative volume too low.")
+    if chop_score is not None and chop_score >= 70:
+        warnings.append("Chop score too high.")
+    if aapl_rvol is not None and aapl_rvol < 0.35:
+        warnings.append("AAPL relative volume extremely low.")
+    elif aapl_rvol is not None and aapl_rvol < 0.7:
+        warnings.append("AAPL relative volume low.")
     if atr14 is not None and atr14 < 0.12:
         warnings.append("ATR too low for clean intraday movement.")
+    if market_opposes:
+        warnings.append("Market confirmation is against setup direction.")
+    if spy_opposes:
+        warnings.append("SPY bias opposes setup.")
+    if qqq_opposes:
+        warnings.append("QQQ bias opposes setup.")
+    if relative_strength_bad:
+        warnings.append("AAPL relative strength conflicts with setup direction.")
+    if rr_grade == "BAD":
+        warnings.append("Risk/reward is BAD.")
+    elif rr_grade == "WEAK":
+        warnings.append("Risk/reward is WEAK.")
+    if confirmation_stage in {"WATCH", None}:
+        warnings.append("Setup is watch-only.")
     if not reclaim_confirmed:
         warnings.append("No reclaim/rejection confirmation yet.")
     if not structure_confirmed:
@@ -2676,153 +2811,223 @@ def strict_trade_quality_grade(setup, professional_context):
         warnings.append("AAPL trend filter not confirmed.")
     if not volume_confirmed:
         warnings.append("Volume not confirmed.")
-    if setup.get("kind") in {"support", "resistance"} and level_quality_grade_value == "WEAK":
-        warnings.append("Support/resistance level quality is weak.")
-    if setup.get("kind") in {"supply", "demand"} and zone_quality_grade_value == "WEAK":
-        warnings.append("Supply/demand zone quality is weak.")
-    if market_confirmation_value in {"MIXED", "UNKNOWN"}:
-        warnings.append(f"Market confirmation is {market_confirmation_value}.")
-    if direction == "bullish" and market_confirmation_value == "BEARISH":
-        warnings.append("Market confirmation conflicts with bullish setup.")
-    if direction == "bearish" and market_confirmation_value == "BULLISH":
-        warnings.append("Market confirmation conflicts with bearish setup.")
-    if direction == "bullish" and aapl_relative_strength == "WEAK":
-        warnings.append("AAPL relative strength is weak for bullish setup.")
-    if direction == "bearish" and aapl_relative_strength == "STRONG":
-        warnings.append("AAPL relative strength conflicts with bearish setup.")
+
+    if active_quality_grade == "WEAK":
+        warnings.append("Underlying level/zone quality is weak.")
+    elif active_quality_grade == "C":
+        warnings.append("Underlying level/zone quality is only C grade.")
 
     hard_no_trade = (
-        confirmation_stage == "FAILED"
-        or status == "INVALIDATED"
-        or no_trade_context
+        status == "INVALIDATED"
+        or confirmation_stage == "FAILED"
+        or professional_context.get("no_trade")
         or regime == "CHOP"
-        or (chop_score is not None and chop_score >= 70)
         or action_label == "NO_NEW_TRADES"
-        or (aapl_rvol is not None and aapl_rvol < 0.35)
-        or not reclaim_confirmed
+        or (chop_score is not None and chop_score >= 75)
+        or (aapl_rvol is not None and aapl_rvol < 0.30)
+        or market_opposes
+        or rr_grade == "BAD"
+        or active_quality_grade == "WEAK"
     )
 
     score = 0
 
-    # Setup-level score.
-    if setup_score >= 75:
-        score += 20
-    elif setup_score >= 60:
-        score += 15
-    elif setup_score >= 40:
-        score += 8
-
-    # Confirmation score.
-    if trend_confirmed:
-        score += 12
-    if reclaim_confirmed:
-        score += 18
-    if structure_confirmed:
+    # Base setup score.
+    if setup_score >= 80:
         score += 14
-    if volume_confirmed:
-        score += 12
+    elif setup_score >= 65:
+        score += 10
+    elif setup_score >= 50:
+        score += 6
+    elif setup_score >= 35:
+        score += 3
+
+    # Confirmation stage score.
     if confirmation_stage == "CONFIRMED":
-        score += 8
+        score += 24
     elif confirmation_stage == "EARLY_CONFIRM":
-        score += 2
-    elif confirmation_stage == "WATCH":
-        score -= 8
-
-    # Market/risk environment score.
-    if regime == "TREND":
         score += 12
-    elif regime == "RANGE":
-        score += 4
+    elif confirmation_stage == "WATCH":
+        score += 2
 
-    if aapl_rvol is not None:
-        if aapl_rvol >= 1.5:
-            score += 12
-        elif aapl_rvol >= 1.0:
-            score += 8
-        elif aapl_rvol >= 0.7:
+    if confirmation_score is not None:
+        if confirmation_score >= 80:
+            score += 10
+        elif confirmation_score >= 65:
+            score += 7
+        elif confirmation_score >= 50:
             score += 4
 
-    if atr14 is not None:
-        if atr14 >= 0.3:
-            score += 6
-        elif atr14 >= 0.18:
-            score += 3
+    # Level / zone quality.
+    if active_quality_grade == "A":
+        score += 14
+    elif active_quality_grade == "B":
+        score += 10
+    elif active_quality_grade == "C":
+        score += 3
+    elif active_quality_grade == "WEAK":
+        score -= 20
 
-    # SPY/QQQ alignment score.
+    if isinstance(active_quality_score, (int, float)):
+        if active_quality_score >= 80:
+            score += 5
+        elif active_quality_score >= 65:
+            score += 3
+        elif active_quality_score < 50:
+            score -= 6
+
+    # Setup confirmations.
+    if trend_confirmed:
+        score += 9
+    if reclaim_confirmed:
+        score += 12
+    if structure_confirmed:
+        score += 10
+    if volume_confirmed:
+        score += 9
+
+    # Market regime.
+    if regime == "TREND":
+        score += 10
+    elif regime == "RANGE":
+        score += 2
+    elif regime == "CHOP":
+        score -= 25
+
+    if regime_confidence == "HIGH" and regime == "TREND":
+        score += 4
+    if action_label == "PULLBACKS_ALLOWED":
+        score += 6
+    elif action_label == "TRADE_RANGE_EDGES_ONLY":
+        score += 1
+    elif action_label in {"NO_NEW_TRADES", "WAIT_FOR_BREAKOUT"}:
+        score -= 15
+
+    # Volume / volatility.
+    if aapl_rvol is not None:
+        if aapl_rvol >= 1.5:
+            score += 10
+        elif aapl_rvol >= 1.0:
+            score += 7
+        elif aapl_rvol >= 0.7:
+            score += 3
+        elif aapl_rvol < 0.5:
+            score -= 8
+
+    if atr14 is not None:
+        if atr14 >= 0.30:
+            score += 5
+        elif atr14 >= 0.18:
+            score += 2
+        elif atr14 < 0.12:
+            score -= 5
+
+    # SPY / QQQ / market confirmation.
+    if market_agrees:
+        score += 12
+    elif market_confirmation in {"MIXED", "UNKNOWN"}:
+        score -= 6
+
     if spy_agrees:
-        score += 8
+        score += 5
+    elif spy_opposes:
+        score -= 8
+
     if qqq_agrees:
-        score += 8
-    if market_aligned or market_alignment in {"BULLISH", "BEARISH"}:
-        score += 8
-    # Penalties.
-    if market_alignment == "UNKNOWN":
+        score += 5
+    elif qqq_opposes:
         score -= 8
-        warnings.append("SPY/QQQ market alignment unknown.")
-    if spy_trend == "MIXED":
-        score -= 4
-        warnings.append("SPY trend mixed.")
-    if qqq_trend == "MIXED":
-        score -= 4
-        warnings.append("QQQ trend mixed.")
-    if aapl_rvol is not None and aapl_rvol < 0.7:
+
+    if market_aligned:
+        score += 4
+
+    if market_confirmation_score:
+        if market_confirmation_score >= 75:
+            score += 5
+        elif market_confirmation_score >= 55:
+            score += 2
+        elif market_confirmation_score < 40:
+            score -= 4
+
+    if relative_strength_good:
+        score += 6
+    elif relative_strength_bad:
         score -= 8
-    if regime == "RANGE":
-        score -= 4
-    if action_label == "WAIT_FOR_BREAKOUT":
-        score -= 12
+
+    # Risk/reward.
+    if rr_grade == "GOOD":
+        score += 12
+    elif rr_grade == "OK":
+        score += 7
+    elif rr_grade == "WEAK":
+        score -= 8
+    elif rr_grade == "BAD":
+        score -= 25
+
+    if isinstance(rr_2, (int, float)):
+        if rr_2 >= 2.5:
+            score += 5
+        elif rr_2 >= 2.0:
+            score += 3
+        elif rr_2 < 1.5:
+            score -= 5
+    elif isinstance(rr_1, (int, float)) and rr_1 < 1.0:
+        score -= 5
+
     score = max(0, min(100, int(score)))
 
-    if setup.get("kind") in {"support", "resistance"}:
-        if level_quality_grade_value == "A":
-            score = min(100, score + 8)
-        elif level_quality_grade_value == "B":
-            score = min(100, score + 4)
-        elif level_quality_grade_value == "WEAK":
-            score = max(0, score - 12)
-    if setup.get("kind") in {"supply", "demand"}:
-        if zone_quality_grade_value == "A":
-            score = min(100, score + 8)
-        elif zone_quality_grade_value == "B":
-            score = min(100, score + 4)
-        elif zone_quality_grade_value == "WEAK":
-            score = max(0, score - 12)
+    # Grade gates.
+    # A+ should be rare and require strong agreement.
+    can_be_a_plus = (
+        confirmation_stage == "CONFIRMED"
+        and reclaim_confirmed
+        and structure_confirmed
+        and volume_confirmed
+        and trend_confirmed
+        and active_quality_grade in {"A", "B", "UNKNOWN"}
+        and rr_grade == "GOOD"
+        and regime == "TREND"
+        and action_label == "PULLBACKS_ALLOWED"
+        and (market_agrees or (spy_agrees and qqq_agrees))
+        and not hard_no_trade
+    )
 
-    if direction == "bullish" and market_confirmation_value == "BULLISH":
-        score = min(100, score + 10)
-    elif direction == "bearish" and market_confirmation_value == "BEARISH":
-        score = min(100, score + 10)
-    elif market_confirmation_value == "MIXED":
-        score = max(0, score - 10)
-    elif market_confirmation_value == "UNKNOWN":
-        score = max(0, score - 12)
-    elif direction == "bullish" and market_confirmation_value == "BEARISH":
-        score = max(0, score - 22)
-    elif direction == "bearish" and market_confirmation_value == "BULLISH":
-        score = max(0, score - 22)
+    can_be_a = (
+        confirmation_stage == "CONFIRMED"
+        and reclaim_confirmed
+        and structure_confirmed
+        and volume_confirmed
+        and active_quality_grade in {"A", "B", "C", "UNKNOWN"}
+        and rr_grade in {"GOOD", "OK", None}
+        and regime != "CHOP"
+        and action_label not in {"NO_NEW_TRADES", "WAIT_FOR_BREAKOUT"}
+        and not market_opposes
+        and not hard_no_trade
+    )
 
-    if direction == "bullish" and aapl_relative_strength == "WEAK":
-        score = max(0, score - 10)
-    if direction == "bearish" and aapl_relative_strength == "STRONG":
-        score = max(0, score - 10)
+    can_be_b = (
+        confirmation_stage in {"CONFIRMED", "EARLY_CONFIRM"}
+        and reclaim_confirmed
+        and (structure_confirmed or trend_confirmed)
+        and active_quality_grade not in {"WEAK"}
+        and rr_grade not in {"BAD"}
+        and regime != "CHOP"
+        and not market_opposes
+        and not hard_no_trade
+    )
 
     if hard_no_trade:
         grade = "NO_TRADE"
-    elif action_label == "WAIT_FOR_BREAKOUT" and score >= 78:
-        grade = "B"
-    elif score >= 90 and spy_agrees and qqq_agrees and reclaim_confirmed and structure_confirmed and volume_confirmed and trend_confirmed:
+    elif score >= 90 and can_be_a_plus:
         grade = "A+"
-    elif score >= 78 and reclaim_confirmed and structure_confirmed and volume_confirmed:
+    elif score >= 78 and can_be_a:
         grade = "A"
-    elif score >= 62 and reclaim_confirmed and (structure_confirmed or trend_confirmed):
+    elif score >= 62 and can_be_b:
         grade = "B"
     elif score >= 45:
         grade = "C"
     else:
         grade = "NO_TRADE"
-
-    if confirmation_stage != "CONFIRMED" and grade in {"A", "A+"}:
-        grade = "B"
 
     return {
         "grade": grade,
@@ -2834,37 +3039,47 @@ def strict_trade_quality_grade(setup, professional_context):
             "confirmation_stage": confirmation_stage,
             "confirmation_score": confirmation_score,
             "regime": regime,
-            "chop_score": chop_score,
-            "regime_score": regime_score,
             "regime_confidence": regime_confidence,
             "action_label": action_label,
+            "chop_score": chop_score,
             "aapl_rvol": aapl_rvol,
             "atr14": atr14,
             "trend_confirmed": trend_confirmed,
             "reclaim_confirmed": reclaim_confirmed,
             "structure_confirmed": structure_confirmed,
             "volume_confirmed": volume_confirmed,
-            "market_alignment": market_alignment,
-            "market_confirmation": market_confirmation_value,
+            "level_quality_grade": level_quality_grade,
+            "level_quality_score": level_quality_score,
+            "zone_quality_grade": zone_quality_grade,
+            "zone_quality_score": zone_quality_score,
+            "active_quality_grade": active_quality_grade,
+            "active_quality_score": active_quality_score,
+            "market_confirmation": market_confirmation,
             "market_confirmation_score": market_confirmation_score,
-            "aapl_relative_strength": aapl_relative_strength,
             "market_aligned": market_aligned,
-            "spy_trend": spy_trend,
-            "qqq_trend": qqq_trend,
+            "spy_bias": spy_bias,
+            "qqq_bias": qqq_bias,
             "spy_agrees": spy_agrees,
             "qqq_agrees": qqq_agrees,
-            "level_quality_grade": level_quality_grade_value,
-            "level_quality_score": setup.get("level_quality_score"),
-            "zone_quality_grade": zone_quality_grade_value,
-            "zone_quality_score": setup.get("zone_quality_score"),
+            "market_agrees": market_agrees,
+            "market_opposes": market_opposes,
+            "aapl_relative_strength": aapl_relative_strength,
+            "relative_strength_good": relative_strength_good,
+            "relative_strength_bad": relative_strength_bad,
+            "rr_grade": rr_grade,
+            "rr_1": rr_1,
+            "rr_2": rr_2,
+            "uses_zone": uses_zone,
+            "uses_sr": uses_sr,
         },
         "read_only": True,
     }
 
 
+
 def grade_confirmation_setups_with_context(confirmation_setups, professional_context):
     """
-    Applies strict professional quality grading to each read-only setup.
+    Applies strict professional quality grading v2 to each read-only setup.
     """
     if not confirmation_setups:
         return confirmation_setups
@@ -2875,6 +3090,7 @@ def grade_confirmation_setups_with_context(confirmation_setups, professional_con
         confirmation_setups["best_score"] = 0
         confirmation_setups["quality_warnings"] = []
         confirmation_setups["strict_grading"] = True
+        confirmation_setups["strict_grading_version"] = 2
         confirmation_setups["read_only"] = True
         return confirmation_setups
 
@@ -2897,13 +3113,16 @@ def grade_confirmation_setups_with_context(confirmation_setups, professional_con
         setup["professional_score"] = strict["score"]
         setup["quality_warnings"] = strict["warnings"]
         setup["quality_checks"] = strict["checks"]
+        setup["strict_grading_version"] = 2
         setup["read_only"] = True
 
         all_warnings.extend(strict["warnings"])
 
-        if (
-            grade_rank.get(strict["grade"], 0) > grade_rank.get(best_grade, 0)
-            or strict["score"] > best_score
+        strict_rank = grade_rank.get(strict["grade"], 0)
+        best_rank = grade_rank.get(best_grade, 0)
+
+        if strict_rank > best_rank or (
+            strict_rank == best_rank and strict["score"] > best_score
         ):
             best_grade = strict["grade"]
             best_score = strict["score"]
@@ -2912,9 +3131,11 @@ def grade_confirmation_setups_with_context(confirmation_setups, professional_con
     confirmation_setups["best_score"] = best_score
     confirmation_setups["quality_warnings"] = list(dict.fromkeys(all_warnings))[:12]
     confirmation_setups["strict_grading"] = True
+    confirmation_setups["strict_grading_version"] = 2
     confirmation_setups["read_only"] = True
 
     return confirmation_setups
+
 
 
 def build_risk_reward_targets(direction, entry, levels=None, support_resistance=None, supply_demand=None, level_clusters=None):
