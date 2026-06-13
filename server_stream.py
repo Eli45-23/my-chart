@@ -138,6 +138,56 @@ def et_datetime(day, hour, minute=0):
     return datetime(day.year, day.month, day.day, hour, minute, tzinfo=ET)
 
 
+def build_market_session_status(now=None):
+    current = now or datetime.now(ET)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=ET)
+    else:
+        current = current.astimezone(ET)
+
+    is_weekend = current.weekday() >= 5
+    minutes = current.hour * 60 + current.minute
+    is_premarket = not is_weekend and 4 * 60 <= minutes < 9 * 60 + 30
+    is_regular = not is_weekend and 9 * 60 + 30 <= minutes < 16 * 60
+    is_after_hours = not is_weekend and 16 * 60 <= minutes < 20 * 60
+
+    if is_weekend:
+        session_label = "CLOSED"
+        closed_reason = "Weekend"
+    elif is_premarket:
+        session_label = "PREMARKET"
+        closed_reason = None
+    elif is_regular:
+        session_label = "REGULAR"
+        closed_reason = None
+    elif is_after_hours:
+        session_label = "AFTER_HOURS"
+        closed_reason = None
+    else:
+        session_label = "CLOSED"
+        closed_reason = "Outside supported session hours"
+
+    return {
+        "timezone": "America/New_York",
+        "current_time_et": current.isoformat(),
+        "date_et": current.date().isoformat(),
+        "weekday": current.strftime("%A"),
+        "is_weekend": is_weekend,
+        "is_regular_session_open": is_regular,
+        "is_premarket_open": is_premarket,
+        "is_after_hours_open": is_after_hours,
+        "is_market_open_for_trading": bool(is_premarket or is_regular or is_after_hours),
+        "session_label": session_label,
+        "market_closed_reason": closed_reason,
+        "regular_session_hours_et": "09:30-16:00",
+        "premarket_hours_et": "04:00-09:30",
+        "after_hours_et": "16:00-20:00",
+        "holiday_calendar_enabled": False,
+        "holiday_warning": "Holiday calendar not implemented; verify exchange holidays manually.",
+        "read_only": True,
+    }
+
+
 def previous_weekday(day):
     d = day - timedelta(days=1)
     while d.weekday() >= 5:
@@ -4449,6 +4499,7 @@ def build_ai_chart_snapshot(requested_timeframe="5Min"):
         if cached_at and cached_snapshot and (now - cached_at).total_seconds() < AI_SNAPSHOT_CACHE_SECONDS:
             snapshot = dict(cached_snapshot)
             snapshot["cache_status"] = "hit"
+            snapshot["market_session_status"] = build_market_session_status(now)
             snapshot["ai_event"] = current_ai_event_metadata()
             return snapshot
 
@@ -4479,6 +4530,7 @@ def build_ai_chart_snapshot(requested_timeframe="5Min"):
         "timestamp": now.isoformat(),
         "current_price": round_price(current_price),
         "requested_timeframe": requested_timeframe,
+        "market_session_status": build_market_session_status(now),
         "timeframes": timeframe_contexts,
         "market_context": {
             "market_regime": regime.get("regime"),
@@ -4791,12 +4843,35 @@ def apply_ai_event_metadata(review, acknowledge=False):
     return review
 
 
-def build_fallback_direct_answer(user_message, chart_summary):
+def build_fallback_direct_answer(user_message, chart_summary, market_session_status=None):
     if not user_message:
         return "No specific question was asked. The current chart review is summarized below."
 
     question = str(user_message).strip()
     question_lower = question.lower()
+    market_session_status = market_session_status or {}
+    market_open_phrases = [
+        "is the market open",
+        "market open today",
+        "is trading open",
+        "can i trade today",
+    ]
+    if any(phrase in question_lower for phrase in market_open_phrases):
+        session_label = market_session_status.get("session_label")
+        if market_session_status.get("is_weekend"):
+            return "The regular U.S. stock market session is closed today because it is the weekend."
+        if session_label == "REGULAR":
+            answer = "The regular U.S. stock market session is open now."
+        elif session_label == "PREMARKET":
+            answer = "The regular U.S. stock market session is not open yet; the supported premarket session is open."
+        elif session_label == "AFTER_HOURS":
+            answer = "The regular U.S. stock market session is closed; the supported after-hours session is open."
+        else:
+            answer = "The U.S. stock market is closed now because it is outside supported session hours."
+        if not market_session_status.get("holiday_calendar_enabled", False):
+            answer += " Holiday calendar not implemented; verify exchange holidays manually."
+        return answer
+
     source_terms = ["source", "doctrine", "education", "occ", "finra", "cboe", "investor.gov"]
     options_terms = ["option", "0dte", "short-dated", "theta", "volatility", "iv"]
 
@@ -4860,6 +4935,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
     stage = setup.get("confirmation_stage")
     direction = setup.get("direction") if setup.get("direction") in {"bullish", "bearish"} else "neutral"
     volume_context = select_review_volume_context(snapshot, setup)
+    market_session_status = snapshot.get("market_session_status") or build_market_session_status()
 
     warnings = list(gates.get("warnings") or [])
     warnings.extend(risk_reward.get("rr_warnings") or [])
@@ -4905,7 +4981,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
     elif volume_context.get("volume_strength") == "weak":
         confidence = max(0, confidence - 5)
 
-    direct_answer = build_fallback_direct_answer(user_message, summary)
+    direct_answer = build_fallback_direct_answer(user_message, summary, market_session_status)
     application_to_current_setup = build_current_setup_application(
         decision,
         summary,
@@ -4957,6 +5033,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
         "gate_checks": gates.get("checks"),
         "extension": gates.get("extension"),
         "volume_context": volume_context,
+        "market_session_status": market_session_status,
         "user_message": user_message,
         "read_only": True,
     }
@@ -5136,6 +5213,10 @@ def call_openai_trade_review(snapshot, user_message=None):
         "Use each intraday timeframe's volume_context as confirmation and risk context only. Mention strong or weak "
         "volume when relevant, but never treat volume as a standalone trade signal or let it override marker gates. "
         "For short-dated and 0DTE options, low RVOL increases stall and chop risk. "
+        "If the user asks whether the market is open, answer using market_session_status only and never guess from "
+        "general knowledge. If it says CLOSED, say the market is closed. If it is a weekend, clearly say the regular "
+        "U.S. stock market session is closed because it is the weekend. When holiday_calendar_enabled is false on a "
+        "weekday, mention that exchange holidays must be verified manually. "
         "When user_message is provided, answer the user's exact question first in direct_answer, then explain how "
         "it applies to the current AAPL snapshot in application_to_current_setup. If asked about reliable sources, "
         "explicitly mention the OCC Options Disclosure Document, FINRA options investor education, Cboe Options "

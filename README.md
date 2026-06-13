@@ -61,6 +61,8 @@ From the AI panel inside `/performance`, you can review the current chart or ask
 
 The compact AI snapshot also includes read-only Volume/RVOL confirmation context for intraday timeframes. Volume can adjust review confidence and warnings, but it is not drawn on the main chart, cannot create a setup, and cannot override marker gates.
 
+AI market-open answers use a deterministic America/New_York session-status object from the backend. Weekend and supported session-hour status are calculated directly; exchange holidays are not yet implemented and should be verified manually.
+
 AI Trade Review:
 
 - does not place trades

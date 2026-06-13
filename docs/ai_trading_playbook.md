@@ -72,6 +72,15 @@ For questions about reliable options-risk sources, explicitly identify the OCC O
 
 After the direct answer, apply the doctrine to the current setup using the backend decision, marker gates, setup quality, market regime, SPY/QQQ confirmation, risk/reward, invalidation, extension, and relevant options risks. The direct answer and application must remain subordinate to backend rules.
 
+### Market Session Awareness
+
+Questions about whether the U.S. stock market is open must be answered only from the deterministic backend `market_session_status` object. The AI must never guess session status from general knowledge or infer it from chart activity.
+
+- Saturday and Sunday are closed.
+- `PREMARKET`, `REGULAR`, `AFTER_HOURS`, and `CLOSED` labels come from backend-calculated America/New_York time.
+- When the session is `CLOSED`, clearly say it is closed and state the backend-provided reason.
+- The holiday calendar is not implemented. On weekdays, remind the user to verify exchange holidays manually when relevant.
+
 ## Status and Scope
 
 This playbook defines the doctrine for the AI Trade Review module. The module provides read-only trading education and chart review. It is not financial advice, an order, an execution system, or a promise of results.
