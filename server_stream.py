@@ -1770,6 +1770,9 @@ def log_confirmation_setups(symbol, timeframe, confirmation_setups, professional
                 "warnings": professional_context.get("warnings", []),
                 "aapl_regime": professional_context.get("aapl", {}).get("regime", {}).get("regime"),
                 "aapl_chop_score": professional_context.get("aapl", {}).get("regime", {}).get("chop_score"),
+                "aapl_regime_score": professional_context.get("aapl", {}).get("regime", {}).get("regime_score"),
+                "aapl_regime_confidence": professional_context.get("aapl", {}).get("regime", {}).get("regime_confidence"),
+                "aapl_action_label": professional_context.get("aapl", {}).get("regime", {}).get("action_label"),
                 "aapl_rvol": professional_context.get("aapl", {}).get("rvol"),
                 "aapl_atr14": professional_context.get("aapl", {}).get("atr14"),
                 "spy_trend": professional_context.get("spy", {}).get("trend", {}).get("label"),
@@ -2128,13 +2131,20 @@ def candle_body_ratio(candle):
 def detect_chop_regime(candles, indicators, current_price=None):
     if not candles or len(candles) < 12:
         return {
-            "regime": "UNKNOWN",
+            "regime": "CHOP",
+            "regime_score": 0,
             "chop_score": 50,
             "trend_score": 0,
+            "range_score": 0,
+            "regime_confidence": "LOW",
+            "action_label": "WAIT_FOR_BREAKOUT",
+            "regime_reasons": ["Not enough candles for confident regime detection."],
+            "regime_warnings": ["Regime confidence is low."],
+            "read_only": True,
             "reason": "not_enough_candles",
         }
 
-    recent = candles[-12:]
+    recent = candles[-20:]
     closes = [c["close"] for c in recent]
     highs = [c["high"] for c in recent]
     lows = [c["low"] for c in recent]
@@ -2146,16 +2156,20 @@ def detect_chop_regime(candles, indicators, current_price=None):
     ema9 = indicators.get("ema9") or []
     ema20 = indicators.get("ema20") or []
     vwap = indicators.get("vwap") or []
+    atr14 = latest_indicator_value(indicators.get("atr14"))
+    rvol = calc_rvol(candles, 20)
 
     ema_cross_noise = 0
-    paired = list(zip(ema9[-12:], ema20[-12:]))
+    paired = list(zip(ema9[-20:], ema20[-20:]))
     last_side = None
+    ema_gaps = []
 
     for e9, e20 in paired:
         v9 = e9.get("value")
         v20 = e20.get("value")
         if v9 is None or v20 is None:
             continue
+        ema_gaps.append(abs(v9 - v20))
 
         side = "above" if v9 > v20 else "below" if v9 < v20 else "same"
         if last_side and side != last_side and side != "same":
@@ -2163,7 +2177,16 @@ def detect_chop_regime(candles, indicators, current_price=None):
         if side != "same":
             last_side = side
 
-    vwap_slope = slope_from_series(vwap, bars=3)
+    vwap_slope = slope_from_series(vwap, bars=5)
+    vwap_values = [item.get("value") for item in vwap[-len(recent):] if item.get("value") is not None]
+    vwap_crosses = 0
+    last_vwap_side = None
+    for close, value in zip(closes[-len(vwap_values):], vwap_values):
+        side = "above" if close > value else "below" if close < value else "same"
+        if last_vwap_side and side != last_vwap_side and side != "same":
+            vwap_crosses += 1
+        if side != "same":
+            last_vwap_side = side
 
     overlap_count = 0
     for i in range(1, len(recent)):
@@ -2173,39 +2196,121 @@ def detect_chop_regime(candles, indicators, current_price=None):
             overlap_count += 1
 
     overlap_ratio = overlap_count / max(1, len(recent) - 1)
+    ema_gap = sum(ema_gaps) / len(ema_gaps) if ema_gaps else 0
+    ema_compressed = ema_gap <= max(0.03, (atr14 or avg_range) * 0.20)
+    close_above_vwap = sum(1 for close, value in zip(closes[-len(vwap_values):], vwap_values) if close > value)
+    close_below_vwap = sum(1 for close, value in zip(closes[-len(vwap_values):], vwap_values) if close < value)
+    vwap_consistency = max(close_above_vwap, close_below_vwap) / max(1, len(vwap_values))
+
+    higher_structure = sum(
+        1 for i in range(1, len(recent))
+        if recent[i]["high"] > recent[i - 1]["high"] and recent[i]["low"] > recent[i - 1]["low"]
+    )
+    lower_structure = sum(
+        1 for i in range(1, len(recent))
+        if recent[i]["high"] < recent[i - 1]["high"] and recent[i]["low"] < recent[i - 1]["low"]
+    )
+    structure_ratio = max(higher_structure, lower_structure) / max(1, len(recent) - 1)
+
+    trend_score = 0
+    trend_score += int(vwap_consistency * 25)
+    trend_score += 18 if ema_cross_noise == 0 and not ema_compressed else 8 if ema_cross_noise <= 1 else 0
+    trend_score += 15 if vwap_slope["label"] != "FLAT" else 0
+    trend_score += int(structure_ratio * 20)
+    trend_score += 12 if avg_body_ratio >= 0.55 else 6 if avg_body_ratio >= 0.45 else 0
+    trend_score += 5 if atr14 is not None and atr14 >= max(0.15, avg_range * 0.65) else 0
+    trend_score += 5 if rvol is not None and rvol >= 0.8 else 0
+
+    range_score = 0
+    range_score += 25 if vwap_slope["label"] == "FLAT" else 8
+    range_score += 20 if recent_range >= avg_range * 3 and recent_range <= avg_range * 7 else 5
+    range_score += 18 if 0.40 <= overlap_ratio <= 0.70 else 5
+    range_score += 15 if 2 <= vwap_crosses <= 5 else 5
+    range_score += 12 if 0.35 <= avg_body_ratio <= 0.60 else 4
+    range_score += 10 if ema_cross_noise <= 2 else 3
 
     chop_score = 0
-    if avg_body_ratio < 0.45:
-        chop_score += 20
-    if overlap_ratio > 0.60:
-        chop_score += 25
-    if ema_cross_noise >= 2:
-        chop_score += 25
-    if vwap_slope["label"] == "FLAT":
-        chop_score += 20
-    if recent_range < avg_range * 3:
-        chop_score += 10
+    chop_score += 20 if avg_body_ratio < 0.40 else 8 if avg_body_ratio < 0.50 else 0
+    chop_score += 22 if overlap_ratio > 0.70 else 10 if overlap_ratio > 0.55 else 0
+    chop_score += 18 if ema_cross_noise >= 3 else 8 if ema_cross_noise >= 2 else 0
+    chop_score += 15 if ema_compressed else 0
+    chop_score += 18 if vwap_crosses >= 5 else 8 if vwap_crosses >= 3 else 0
+    chop_score += 7 if vwap_slope["label"] == "FLAT" else 0
+    chop_score += 8 if atr14 is not None and atr14 < 0.15 else 0
+    chop_score += 7 if rvol is not None and rvol < 0.70 else 0
 
-    trend_score = 100 - min(100, chop_score)
+    trend_score = int(max(0, min(100, trend_score)))
+    range_score = int(max(0, min(100, range_score)))
+    chop_score = int(max(0, min(100, chop_score)))
+    scores = {"TREND": trend_score, "RANGE": range_score, "CHOP": chop_score}
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    regime, regime_score = ranked[0]
+    score_gap = regime_score - ranked[1][1]
 
-    if chop_score >= 70:
-        regime = "CHOP"
-    elif chop_score >= 50:
-        regime = "RANGE"
+    if regime_score >= 75 and score_gap >= 15:
+        confidence = "HIGH"
+    elif regime_score >= 58 and score_gap >= 8:
+        confidence = "MEDIUM"
     else:
-        regime = "TREND"
+        confidence = "LOW"
+
+    if regime == "TREND" and confidence != "LOW":
+        action_label = "PULLBACKS_ALLOWED"
+    elif regime == "RANGE" and confidence != "LOW":
+        action_label = "TRADE_RANGE_EDGES_ONLY"
+    elif regime == "CHOP" and chop_score >= 65:
+        action_label = "NO_NEW_TRADES"
+    else:
+        action_label = "WAIT_FOR_BREAKOUT"
+
+    reasons = [
+        f"VWAP consistency {round(vwap_consistency * 100)}%",
+        f"VWAP crosses {vwap_crosses}",
+        f"EMA crosses {ema_cross_noise}",
+        f"candle overlap {round(overlap_ratio * 100)}%",
+        f"body strength {round(avg_body_ratio * 100)}%",
+    ]
+    if vwap_slope["label"] != "FLAT":
+        reasons.append(f"VWAP is {vwap_slope['label'].lower()}")
+    if ema_compressed:
+        reasons.append("EMA9 and EMA20 are compressed")
+    if structure_ratio >= 0.45:
+        reasons.append("directional high/low structure is present")
+
+    warnings = []
+    if action_label == "NO_NEW_TRADES":
+        warnings.append("High chop conditions: no new trades.")
+    if action_label == "WAIT_FOR_BREAKOUT":
+        warnings.append("Regime scores are mixed: wait for breakout.")
+    if vwap_crosses >= 5:
+        warnings.append("Price is crossing VWAP repeatedly.")
+    if ema_cross_noise >= 3:
+        warnings.append("EMA9 and EMA20 are crossing repeatedly.")
+    if rvol is not None and rvol < 0.70:
+        warnings.append("Relative volume is low.")
 
     return {
         "regime": regime,
-        "chop_score": int(min(100, chop_score)),
-        "trend_score": int(max(0, trend_score)),
+        "regime_score": regime_score,
+        "trend_score": trend_score,
+        "range_score": range_score,
+        "chop_score": chop_score,
+        "regime_confidence": confidence,
+        "action_label": action_label,
+        "regime_reasons": reasons,
+        "regime_warnings": warnings,
+        "read_only": True,
         "vwap_slope": vwap_slope,
         "ema_cross_noise": ema_cross_noise,
+        "ema_compressed": ema_compressed,
+        "vwap_crosses": vwap_crosses,
         "overlap_ratio": round(overlap_ratio, 2),
         "avg_body_ratio": round(avg_body_ratio, 2),
         "recent_range": round_price(recent_range),
         "avg_range": round_price(avg_range),
-        "reason": "CHOP if overlap/cross noise/flat VWAP dominate; TREND if structure is cleaner.",
+        "rvol": rvol,
+        "atr14": round_price(atr14),
+        "reason": "Weighted market regime engine using VWAP, EMA, structure, candle quality, ATR, and RVOL.",
     }
 
 
@@ -2303,6 +2408,16 @@ def build_professional_market_context(candles, indicators, current_price, timefr
 
     if market_alignment == "MIXED":
         warnings.append("SPY and QQQ are mixed.")
+        aapl_regime["regime_confidence"] = "LOW"
+        if aapl_regime.get("action_label") != "NO_NEW_TRADES":
+            aapl_regime["action_label"] = "WAIT_FOR_BREAKOUT"
+        aapl_regime.setdefault("regime_warnings", []).append("SPY and QQQ context is mixed.")
+
+    if aapl_regime.get("action_label") == "NO_NEW_TRADES":
+        no_trade = True
+        warnings.append("Market regime says no new trades.")
+    elif aapl_regime.get("action_label") == "WAIT_FOR_BREAKOUT":
+        warnings.append("Market regime says wait for breakout.")
 
     if aapl_rvol is not None and aapl_rvol < 0.80:
         warnings.append("AAPL relative volume is low.")
@@ -2370,6 +2485,9 @@ def strict_trade_quality_grade(setup, professional_context):
 
     regime = aapl_context.get("regime", {}).get("regime")
     chop_score = aapl_context.get("regime", {}).get("chop_score")
+    regime_score = aapl_context.get("regime", {}).get("regime_score")
+    regime_confidence = aapl_context.get("regime", {}).get("regime_confidence")
+    action_label = aapl_context.get("regime", {}).get("action_label")
     aapl_rvol = aapl_context.get("rvol")
     atr14 = aapl_context.get("atr14")
     market_alignment = professional_context.get("market_alignment") if professional_context else "UNKNOWN"
@@ -2400,6 +2518,10 @@ def strict_trade_quality_grade(setup, professional_context):
         warnings.append("AAPL is in chop.")
     if chop_score is not None and chop_score >= 70:
         warnings.append("Chop score too high.")
+    if action_label == "NO_NEW_TRADES":
+        warnings.append("Market regime says no new trades.")
+    if action_label == "WAIT_FOR_BREAKOUT":
+        warnings.append("Market regime says wait for breakout.")
     if aapl_rvol is not None and aapl_rvol < 0.5:
         warnings.append("AAPL relative volume too low.")
     if atr14 is not None and atr14 < 0.12:
@@ -2422,6 +2544,7 @@ def strict_trade_quality_grade(setup, professional_context):
         or no_trade_context
         or regime == "CHOP"
         or (chop_score is not None and chop_score >= 70)
+        or action_label == "NO_NEW_TRADES"
         or (aapl_rvol is not None and aapl_rvol < 0.35)
         or not reclaim_confirmed
     )
@@ -2488,6 +2611,8 @@ def strict_trade_quality_grade(setup, professional_context):
         score -= 8
     if regime == "RANGE":
         score -= 4
+    if action_label == "WAIT_FOR_BREAKOUT":
+        score -= 12
     score = max(0, min(100, int(score)))
 
     if setup.get("kind") in {"support", "resistance"}:
@@ -2507,6 +2632,8 @@ def strict_trade_quality_grade(setup, professional_context):
 
     if hard_no_trade:
         grade = "NO_TRADE"
+    elif action_label == "WAIT_FOR_BREAKOUT" and score >= 78:
+        grade = "B"
     elif score >= 90 and spy_agrees and qqq_agrees and reclaim_confirmed and structure_confirmed and volume_confirmed and trend_confirmed:
         grade = "A+"
     elif score >= 78 and reclaim_confirmed and structure_confirmed and volume_confirmed:
@@ -2527,6 +2654,9 @@ def strict_trade_quality_grade(setup, professional_context):
             "status": status,
             "regime": regime,
             "chop_score": chop_score,
+            "regime_score": regime_score,
+            "regime_confidence": regime_confidence,
+            "action_label": action_label,
             "aapl_rvol": aapl_rvol,
             "atr14": atr14,
             "trend_confirmed": trend_confirmed,
@@ -2819,6 +2949,11 @@ def calculate_setup_risk_reward(
         warnings.append("setup is not CONFIRMED yet")
     if professional_context.get("aapl", {}).get("regime", {}).get("regime") == "CHOP":
         warnings.append("market is CHOP")
+    regime_action = professional_context.get("aapl", {}).get("regime", {}).get("action_label")
+    if regime_action == "NO_NEW_TRADES":
+        warnings.append("regime action is NO_NEW_TRADES")
+    elif regime_action == "WAIT_FOR_BREAKOUT":
+        warnings.append("regime action is WAIT_FOR_BREAKOUT")
 
     rr_1 = rr_values[0]
     rr_2 = rr_values[1]
@@ -3465,6 +3600,9 @@ def chart_data():
             today_start,
             today_end,
         )
+
+        for setup in confirmation_setups.get("setups", []):
+            setup["market_regime"] = dict(professional_context.get("aapl", {}).get("regime", {}))
 
         confirmation_setups = grade_confirmation_setups_with_context(
             confirmation_setups,
