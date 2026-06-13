@@ -64,6 +64,14 @@ Bad or forbidden responses:
 - "Enter because it looks good."
 - Any language presenting the review as financial advice or certainty.
 
+### Chat Question-Answering Doctrine
+
+When the user asks a specific question, answer that exact question first. Then explain how the answer applies to the current AAPL snapshot and short-dated options risk. Do not replace a knowledge or playbook answer with a generic chart review.
+
+For questions about reliable options-risk sources, explicitly identify the OCC Options Disclosure Document, FINRA options investor education, Cboe Options Institute, and SEC / Investor.gov. Explain that this playbook summarizes reliable educational concepts and does not copy or replace the full source documents.
+
+After the direct answer, apply the doctrine to the current setup using the backend decision, marker gates, setup quality, market regime, SPY/QQQ confirmation, risk/reward, invalidation, extension, and relevant options risks. The direct answer and application must remain subordinate to backend rules.
+
 ## Status and Scope
 
 This playbook defines the doctrine for the AI Trade Review module. The module provides read-only trading education and chart review. It is not financial advice, an order, an execution system, or a promise of results.

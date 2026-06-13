@@ -62,6 +62,8 @@ def empty_ai_review():
         "bias": "neutral",
         "confidence": 0,
         "summary": f"No AI trade review has been requested yet. {AI_REVIEW_SAFETY_TEXT}",
+        "direct_answer": "No question has been asked yet.",
+        "application_to_current_setup": "No current setup review is available.",
         "what_ai_sees": "No current review is available.",
         "professional_reasoning": "Wait for a current structured chart snapshot and review.",
         "entry_conditions": [],
@@ -4679,6 +4681,47 @@ def apply_ai_event_metadata(review, acknowledge=False):
     return review
 
 
+def build_fallback_direct_answer(user_message, chart_summary):
+    if not user_message:
+        return "No specific question was asked. The current chart review is summarized below."
+
+    question = str(user_message).strip()
+    question_lower = question.lower()
+    source_terms = ["source", "doctrine", "education", "occ", "finra", "cboe", "investor.gov"]
+    options_terms = ["option", "0dte", "short-dated", "theta", "volatility", "iv"]
+
+    if any(term in question_lower for term in source_terms) and any(term in question_lower for term in options_terms):
+        return (
+            "The options-risk doctrine is grounded in summarized educational principles from the OCC Options "
+            "Disclosure Document, FINRA options investor education, Cboe Options Institute, and SEC / Investor.gov. "
+            "The playbook summarizes reliable concepts and does not copy or replace the full source documents. "
+            "For AAPL short-dated and 0DTE setups, that doctrine requires attention to theta decay, implied-volatility "
+            "and volatility risk, bid-ask spread, liquidity and slippage, and the need for speed plus closed-candle "
+            "confirmation. A correct AAPL direction can still produce a poor option result if the move stalls or the "
+            "contract is expensive or illiquid. Chop, weak risk/reward, missing invalidation, and chasing an extended "
+            "entry are no-go conditions."
+        )
+
+    return (
+        f"Direct answer based on the current deterministic chart review: {chart_summary} "
+        "The backend snapshot and hard gates remain authoritative."
+    )
+
+
+def build_current_setup_application(decision, summary, setup, risk_reward, market_context, gates):
+    grade = setup.get("professional_grade") or "unrated"
+    stage = setup.get("confirmation_stage") or setup.get("status") or "no setup"
+    rr_grade = risk_reward.get("rr_grade") or "unavailable"
+    regime = market_context.get("market_regime") or "unknown"
+    market_confirmation = market_context.get("market_confirmation") or "unknown"
+    marker_status = "allowed" if gates.get("allow_entry_marker") else "not allowed"
+    return (
+        f"Current chart decision: {decision}. Entry marker is {marker_status}. "
+        f"Setup quality is {grade} with stage {stage}; risk/reward is {rr_grade}; "
+        f"market regime is {regime}; SPY/QQQ market confirmation is {market_confirmation}. {summary}"
+    )
+
+
 def build_fallback_ai_review(snapshot, user_message=None):
     snapshot = snapshot or {}
     best_setup = snapshot.get("best_setup")
@@ -4722,6 +4765,16 @@ def build_fallback_ai_review(snapshot, user_message=None):
         decision = "WAIT"
         confidence = min(50, int(setup.get("professional_score") or 20))
         summary = "Current setup evidence is incomplete. Wait for clearer confirmation."
+
+    direct_answer = build_fallback_direct_answer(user_message, summary)
+    application_to_current_setup = build_current_setup_application(
+        decision,
+        summary,
+        setup,
+        risk_reward,
+        market_context,
+        gates,
+    )
 
     entry_conditions = []
     if best_setup:
@@ -4772,6 +4825,8 @@ def build_fallback_ai_review(snapshot, user_message=None):
         "bias": direction,
         "confidence": max(0, min(100, int(confidence))),
         "summary": f"{summary} {AI_REVIEW_SAFETY_TEXT}",
+        "direct_answer": direct_answer,
+        "application_to_current_setup": application_to_current_setup,
         "what_ai_sees": summary,
         "professional_reasoning": (
             "The deterministic chart engines, strict grade, confirmation stage, market context, "
@@ -4826,6 +4881,8 @@ def ai_trade_review_json_schema():
             "bias": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
             "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
             "summary": {"type": "string"},
+            "direct_answer": {"type": "string"},
+            "application_to_current_setup": {"type": "string"},
             "what_ai_sees": {"type": "string"},
             "professional_reasoning": {"type": "string"},
             "entry_conditions": string_list,
@@ -4866,6 +4923,8 @@ def ai_trade_review_json_schema():
             "bias",
             "confidence",
             "summary",
+            "direct_answer",
+            "application_to_current_setup",
             "what_ai_sees",
             "professional_reasoning",
             "entry_conditions",
@@ -4923,6 +4982,10 @@ def call_openai_trade_review(snapshot, user_message=None):
         "Do not invent rules or facts outside the structured backend snapshot. "
         "The deterministic chart engine, snapshot, and backend hard gates are the source of truth. "
         "If educational doctrine and current chart data appear to conflict, chart data and backend gates win. "
+        "When user_message is provided, answer the user's exact question first in direct_answer, then explain how "
+        "it applies to the current AAPL snapshot in application_to_current_setup. If asked about reliable sources, "
+        "explicitly mention the OCC Options Disclosure Document, FINRA options investor education, Cboe Options "
+        "Institute, and SEC / Investor.gov, and explain that the playbook summarizes rather than copies them. "
         "You cannot override gates, place trades, tell the user to buy or sell now, claim certainty, "
         "or remove risk warnings. Explain uncertainty professionally and prefer WAIT over a forced setup. "
         "Return only the required JSON. "
@@ -4943,9 +5006,10 @@ def call_openai_trade_review(snapshot, user_message=None):
                 {
                     "role": "user",
                     "content": (
-                        "Review this compact multi-timeframe chart snapshot and explain possible traps, "
-                        "no-go conditions, what must happen before entry, confidence, and options risk if "
-                        "the setup stalls. Backend gates cannot be overridden.\n"
+                        "If user_message is present, answer it directly first. Then apply that answer to the current "
+                        "chart and review the compact multi-timeframe snapshot, including traps, no-go conditions, "
+                        "what must happen before entry, confidence, and options risk if the setup stalls. "
+                        "Backend gates cannot be overridden.\n"
                         + json.dumps(prompt_payload, separators=(",", ":"), sort_keys=True)
                     ),
                 },
@@ -4995,6 +5059,8 @@ def normalize_openai_trade_review(review, snapshot, fallback_review):
         "bias",
         "confidence",
         "summary",
+        "direct_answer",
+        "application_to_current_setup",
         "what_ai_sees",
         "professional_reasoning",
         "entry_conditions",
@@ -5735,6 +5801,8 @@ def performance_dashboard():
         <div class="ai-section"><h3>Entry Marker</h3><div id="aiMarker" class="ai-marker-blocked">Not allowed</div></div>
       </div>
       <div class="ai-detail-grid">
+        <div class="ai-section"><h3>Direct Answer</h3><p id="aiDirectAnswer"></p></div>
+        <div class="ai-section"><h3>Application To Current Setup</h3><p id="aiCurrentApplication"></p></div>
         <div class="ai-section"><h3>Summary</h3><p id="aiSummary"></p></div>
         <div class="ai-section"><h3>What AI Sees</h3><p id="aiSees"></p></div>
         <div class="ai-section"><h3>Professional Reasoning</h3><p id="aiReasoning"></p></div>
@@ -5946,6 +6014,8 @@ def performance_dashboard():
 
       setText("aiBias", review.bias || "neutral");
       setText("aiConfidence", `${Number(review.confidence || 0)}%`);
+      setText("aiDirectAnswer", review.direct_answer);
+      setText("aiCurrentApplication", review.application_to_current_setup);
       setText("aiSummary", review.summary);
       setText("aiSees", review.what_ai_sees);
       setText("aiReasoning", review.professional_reasoning);

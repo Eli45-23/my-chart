@@ -57,7 +57,7 @@ http://127.0.0.1:8900/performance
 
 AI Trade Review is a strict, read-only intraday chart and options review assistant. It uses structured chart data, a compact multi-timeframe snapshot, existing backend grading and risk rules, and the doctrine in `docs/ai_trading_playbook.md`.
 
-From the AI panel inside `/performance`, you can review the current chart or ask questions about setups, confirmation, traps, risk/reward, market regime, and SPY/QQQ confirmation. The chart can display a possible-entry marker for a confirmed A or A+ setup only after every backend safety gate passes.
+From the AI panel inside `/performance`, you can review the current chart or ask questions about setups, confirmation, traps, risk/reward, market regime, SPY/QQQ confirmation, and the trading playbook. Chat responses answer the user's question first, then apply the answer to the current structured chart snapshot. The chart can display a possible-entry marker for a confirmed A or A+ setup only after every backend safety gate passes.
 
 AI Trade Review:
 
