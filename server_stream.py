@@ -1766,6 +1766,11 @@ def log_confirmation_setups(symbol, timeframe, confirmation_setups, professional
             "professional_context": {
                 "professional_grade": professional_context.get("professional_grade"),
                 "market_alignment": professional_context.get("market_alignment"),
+                "market_confirmation": professional_context.get("market_confirmation", {}),
+                "market_confirmation_score": professional_context.get("market_confirmation_score"),
+                "spy_bias": professional_context.get("spy_bias"),
+                "qqq_bias": professional_context.get("qqq_bias"),
+                "aapl_relative_strength": professional_context.get("aapl_relative_strength"),
                 "no_trade": professional_context.get("no_trade"),
                 "warnings": professional_context.get("warnings", []),
                 "aapl_regime": professional_context.get("aapl", {}).get("regime", {}).get("regime"),
@@ -2333,12 +2338,76 @@ def fetch_context_symbol(symbol, start, end, timeframe):
         current = source[-1]["close"] if source else None
         trend = confirmation_trend(current, indicators)
         regime = detect_chop_regime(source, indicators, current_price=current)
+        session_open = source[0]["open"] if source else None
+        percent_change = (
+            (current - session_open) / session_open * 100
+            if current is not None and session_open
+            else None
+        )
+        recent = source[-8:]
+        bullish_structure = sum(
+            1 for i in range(1, len(recent))
+            if recent[i]["high"] > recent[i - 1]["high"] and recent[i]["low"] > recent[i - 1]["low"]
+        )
+        bearish_structure = sum(
+            1 for i in range(1, len(recent))
+            if recent[i]["high"] < recent[i - 1]["high"] and recent[i]["low"] < recent[i - 1]["low"]
+        )
+
+        bullish_score = 0
+        bearish_score = 0
+        if trend.get("price") is not None and trend.get("vwap") is not None:
+            if trend["price"] > trend["vwap"]:
+                bullish_score += 25
+            elif trend["price"] < trend["vwap"]:
+                bearish_score += 25
+        if trend.get("ema9") is not None and trend.get("ema20") is not None:
+            if trend["ema9"] > trend["ema20"]:
+                bullish_score += 25
+            elif trend["ema9"] < trend["ema20"]:
+                bearish_score += 25
+        bullish_score += min(20, bullish_structure * 5)
+        bearish_score += min(20, bearish_structure * 5)
+        if regime.get("regime") == "TREND" and regime.get("action_label") == "PULLBACKS_ALLOWED":
+            if trend.get("bullish"):
+                bullish_score += 20
+            if trend.get("bearish"):
+                bearish_score += 20
+        elif regime.get("action_label") in {"NO_NEW_TRADES", "WAIT_FOR_BREAKOUT"}:
+            bullish_score -= 10
+            bearish_score -= 10
+        if percent_change is not None:
+            if percent_change >= 0.20:
+                bullish_score += 10
+            elif percent_change <= -0.20:
+                bearish_score += 10
+
+        bullish_score = max(0, min(100, int(bullish_score)))
+        bearish_score = max(0, min(100, int(bearish_score)))
+        confirmation_score = max(bullish_score, bearish_score)
+
+        if confirmation_score < 35:
+            bias = "UNKNOWN"
+        elif abs(bullish_score - bearish_score) < 15 or regime.get("regime") == "CHOP":
+            bias = "MIXED"
+        elif bullish_score > bearish_score:
+            bias = "BULLISH"
+        else:
+            bias = "BEARISH"
+
         return {
             "symbol": symbol,
             "current_price": round_price(current),
+            "session_open": round_price(session_open),
+            "percent_change": round(percent_change, 3) if percent_change is not None else None,
             "trend": trend,
             "regime": regime,
             "rvol": calc_rvol(source, 20),
+            "atr14": round_price(latest_indicator_value(indicators.get("atr14"))),
+            "bias": bias,
+            "confirmation_score": confirmation_score,
+            "bullish_score": bullish_score,
+            "bearish_score": bearish_score,
             "data_status": "ok",
         }
     except Exception as e:
@@ -2348,6 +2417,8 @@ def fetch_context_symbol(symbol, start, end, timeframe):
             "trend": {"label": "UNKNOWN"},
             "regime": {"regime": "UNKNOWN", "reason": str(e)},
             "rvol": None,
+            "bias": "UNKNOWN",
+            "confirmation_score": 0,
             "data_status": "error",
             "error": str(e),
         }
@@ -2362,10 +2433,12 @@ def build_professional_market_context(candles, indicators, current_price, timefr
     spy = fetch_context_symbol("SPY", today_start, today_end, timeframe)
     qqq = fetch_context_symbol("QQQ", today_start, today_end, timeframe)
 
-    spy_bull = spy.get("trend", {}).get("bullish", False)
-    qqq_bull = qqq.get("trend", {}).get("bullish", False)
-    spy_bear = spy.get("trend", {}).get("bearish", False)
-    qqq_bear = qqq.get("trend", {}).get("bearish", False)
+    spy_bias = spy.get("bias", "UNKNOWN")
+    qqq_bias = qqq.get("bias", "UNKNOWN")
+    spy_bull = spy_bias == "BULLISH"
+    qqq_bull = qqq_bias == "BULLISH"
+    spy_bear = spy_bias == "BEARISH"
+    qqq_bear = qqq_bias == "BEARISH"
 
     market_bullish = spy_bull and qqq_bull
     market_bearish = spy_bear and qqq_bear
@@ -2380,20 +2453,68 @@ def build_professional_market_context(candles, indicators, current_price, timefr
         market_alignment = "UNKNOWN"
 
     relative_strength = "UNKNOWN"
-    if current_price is not None and candles and spy.get("current_price") and qqq.get("current_price"):
+    aapl_vs_spy_change = None
+    aapl_vs_qqq_change = None
+    if current_price is not None and candles:
         aapl_open = candles[0]["open"]
         if aapl_open:
-            aapl_change = (current_price - aapl_open) / aapl_open
+            aapl_change = (current_price - aapl_open) / aapl_open * 100
         else:
-            aapl_change = 0
+            aapl_change = None
 
-        # Use trend agreement as a practical intraday RS proxy.
-        if aapl_change > 0 and market_alignment in {"MIXED", "BULLISH"} and aapl_trend["bullish"]:
+        if aapl_change is not None and spy.get("percent_change") is not None:
+            aapl_vs_spy_change = round(aapl_change - spy["percent_change"], 3)
+        if aapl_change is not None and qqq.get("percent_change") is not None:
+            aapl_vs_qqq_change = round(aapl_change - qqq["percent_change"], 3)
+
+        comparisons = [value for value in [aapl_vs_spy_change, aapl_vs_qqq_change] if value is not None]
+        if len(comparisons) == 2 and min(comparisons) >= 0.20:
             relative_strength = "STRONG"
-        elif aapl_change < 0 and market_alignment in {"MIXED", "BEARISH"} and aapl_trend["bearish"]:
+        elif len(comparisons) == 2 and max(comparisons) <= -0.20:
             relative_strength = "WEAK"
-        else:
+        elif comparisons:
             relative_strength = "NEUTRAL"
+
+    spy_confirmation_score = int(spy.get("confirmation_score", 0) or 0)
+    qqq_confirmation_score = int(qqq.get("confirmation_score", 0) or 0)
+    if market_alignment in {"BULLISH", "BEARISH"}:
+        market_confirmation_score = int((spy_confirmation_score + qqq_confirmation_score) / 2)
+    elif market_alignment == "MIXED":
+        market_confirmation_score = int((spy_confirmation_score + qqq_confirmation_score) / 4)
+    else:
+        market_confirmation_score = 0
+
+    market_reasons = [
+        f"SPY bias {spy_bias} score {spy_confirmation_score}",
+        f"QQQ bias {qqq_bias} score {qqq_confirmation_score}",
+    ]
+    if relative_strength != "UNKNOWN":
+        market_reasons.append(f"AAPL relative strength {relative_strength}")
+
+    market_warnings = []
+    if market_alignment == "MIXED":
+        market_warnings.append("SPY and QQQ are not aligned.")
+    if market_alignment == "UNKNOWN":
+        market_warnings.append("Market confirmation is unavailable.")
+    if spy.get("regime", {}).get("action_label") in {"NO_NEW_TRADES", "WAIT_FOR_BREAKOUT"}:
+        market_warnings.append("SPY regime is not confirming clean continuation.")
+    if qqq.get("regime", {}).get("action_label") in {"NO_NEW_TRADES", "WAIT_FOR_BREAKOUT"}:
+        market_warnings.append("QQQ regime is not confirming clean continuation.")
+
+    market_confirmation = {
+        "market_confirmation": market_alignment,
+        "market_confirmation_score": market_confirmation_score,
+        "spy_confirmation_score": spy_confirmation_score,
+        "qqq_confirmation_score": qqq_confirmation_score,
+        "spy_bias": spy_bias,
+        "qqq_bias": qqq_bias,
+        "aapl_relative_strength": relative_strength,
+        "aapl_vs_spy_change": aapl_vs_spy_change,
+        "aapl_vs_qqq_change": aapl_vs_qqq_change,
+        "market_reasons": market_reasons,
+        "market_warnings": market_warnings,
+        "read_only": True,
+    }
 
     no_trade = False
     warnings = []
@@ -2450,6 +2571,17 @@ def build_professional_market_context(candles, indicators, current_price, timefr
         "spy": spy,
         "qqq": qqq,
         "market_alignment": market_alignment,
+        "market_confirmation": market_confirmation,
+        "market_confirmation_score": market_confirmation_score,
+        "spy_confirmation_score": spy_confirmation_score,
+        "qqq_confirmation_score": qqq_confirmation_score,
+        "spy_bias": spy_bias,
+        "qqq_bias": qqq_bias,
+        "aapl_relative_strength": relative_strength,
+        "aapl_vs_spy_change": aapl_vs_spy_change,
+        "aapl_vs_qqq_change": aapl_vs_qqq_change,
+        "market_reasons": market_reasons,
+        "market_warnings": market_warnings,
         "professional_grade": professional_grade,
         "no_trade": no_trade,
         "warnings": warnings,
@@ -2491,6 +2623,10 @@ def strict_trade_quality_grade(setup, professional_context):
     aapl_rvol = aapl_context.get("rvol")
     atr14 = aapl_context.get("atr14")
     market_alignment = professional_context.get("market_alignment") if professional_context else "UNKNOWN"
+    market_confirmation = professional_context.get("market_confirmation", {}) if professional_context else {}
+    market_confirmation_value = market_confirmation.get("market_confirmation", market_alignment)
+    market_confirmation_score = market_confirmation.get("market_confirmation_score", 0)
+    aapl_relative_strength = market_confirmation.get("aapl_relative_strength", aapl_context.get("relative_strength"))
     no_trade_context = bool(professional_context.get("no_trade")) if professional_context else False
 
     spy_trend = spy_context.get("trend", {}).get("label")
@@ -2538,6 +2674,16 @@ def strict_trade_quality_grade(setup, professional_context):
         warnings.append("Support/resistance level quality is weak.")
     if setup.get("kind") in {"supply", "demand"} and zone_quality_grade_value == "WEAK":
         warnings.append("Supply/demand zone quality is weak.")
+    if market_confirmation_value in {"MIXED", "UNKNOWN"}:
+        warnings.append(f"Market confirmation is {market_confirmation_value}.")
+    if direction == "bullish" and market_confirmation_value == "BEARISH":
+        warnings.append("Market confirmation conflicts with bullish setup.")
+    if direction == "bearish" and market_confirmation_value == "BULLISH":
+        warnings.append("Market confirmation conflicts with bearish setup.")
+    if direction == "bullish" and aapl_relative_strength == "WEAK":
+        warnings.append("AAPL relative strength is weak for bullish setup.")
+    if direction == "bearish" and aapl_relative_strength == "STRONG":
+        warnings.append("AAPL relative strength conflicts with bearish setup.")
 
     hard_no_trade = (
         status == "INVALIDATED"
@@ -2596,7 +2742,6 @@ def strict_trade_quality_grade(setup, professional_context):
         score += 8
     if market_aligned or market_alignment in {"BULLISH", "BEARISH"}:
         score += 8
-
     # Penalties.
     if market_alignment == "UNKNOWN":
         score -= 8
@@ -2629,6 +2774,24 @@ def strict_trade_quality_grade(setup, professional_context):
             score = min(100, score + 4)
         elif zone_quality_grade_value == "WEAK":
             score = max(0, score - 12)
+
+    if direction == "bullish" and market_confirmation_value == "BULLISH":
+        score = min(100, score + 10)
+    elif direction == "bearish" and market_confirmation_value == "BEARISH":
+        score = min(100, score + 10)
+    elif market_confirmation_value == "MIXED":
+        score = max(0, score - 10)
+    elif market_confirmation_value == "UNKNOWN":
+        score = max(0, score - 12)
+    elif direction == "bullish" and market_confirmation_value == "BEARISH":
+        score = max(0, score - 22)
+    elif direction == "bearish" and market_confirmation_value == "BULLISH":
+        score = max(0, score - 22)
+
+    if direction == "bullish" and aapl_relative_strength == "WEAK":
+        score = max(0, score - 10)
+    if direction == "bearish" and aapl_relative_strength == "STRONG":
+        score = max(0, score - 10)
 
     if hard_no_trade:
         grade = "NO_TRADE"
@@ -2664,6 +2827,9 @@ def strict_trade_quality_grade(setup, professional_context):
             "structure_confirmed": structure_confirmed,
             "volume_confirmed": volume_confirmed,
             "market_alignment": market_alignment,
+            "market_confirmation": market_confirmation_value,
+            "market_confirmation_score": market_confirmation_score,
+            "aapl_relative_strength": aapl_relative_strength,
             "market_aligned": market_aligned,
             "spy_trend": spy_trend,
             "qqq_trend": qqq_trend,
@@ -2954,6 +3120,16 @@ def calculate_setup_risk_reward(
         warnings.append("regime action is NO_NEW_TRADES")
     elif regime_action == "WAIT_FOR_BREAKOUT":
         warnings.append("regime action is WAIT_FOR_BREAKOUT")
+    market_confirmation_value = professional_context.get("market_confirmation", {}).get(
+        "market_confirmation",
+        professional_context.get("market_alignment"),
+    )
+    if direction == "bullish" and market_confirmation_value == "BEARISH":
+        warnings.append("market confirmation conflicts with bullish setup")
+    elif direction == "bearish" and market_confirmation_value == "BULLISH":
+        warnings.append("market confirmation conflicts with bearish setup")
+    elif market_confirmation_value in {"MIXED", "UNKNOWN"}:
+        warnings.append(f"market confirmation is {market_confirmation_value}")
 
     rr_1 = rr_values[0]
     rr_2 = rr_values[1]
@@ -3603,6 +3779,7 @@ def chart_data():
 
         for setup in confirmation_setups.get("setups", []):
             setup["market_regime"] = dict(professional_context.get("aapl", {}).get("regime", {}))
+            setup["market_confirmation"] = dict(professional_context.get("market_confirmation", {}))
 
         confirmation_setups = grade_confirmation_setups_with_context(
             confirmation_setups,
