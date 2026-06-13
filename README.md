@@ -59,6 +59,8 @@ AI Trade Review is a strict, read-only intraday chart and options review assista
 
 From the AI panel inside `/performance`, you can review the current chart or ask questions about setups, confirmation, traps, risk/reward, market regime, SPY/QQQ confirmation, and the trading playbook. Chat responses answer the user's question first, then apply the answer to the current structured chart snapshot. The chart can display a possible-entry marker for a confirmed A or A+ setup only after every backend safety gate passes.
 
+The compact AI snapshot also includes read-only Volume/RVOL confirmation context for intraday timeframes. Volume can adjust review confidence and warnings, but it is not drawn on the main chart, cannot create a setup, and cannot override marker gates.
+
 AI Trade Review:
 
 - does not place trades

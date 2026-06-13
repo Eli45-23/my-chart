@@ -4149,6 +4149,89 @@ def select_best_ai_setup(timeframe_contexts):
     )
 
 
+def build_ai_volume_context(candles, best_setup=None):
+    candles = candles or []
+    unknown = {
+        "latest_volume": None,
+        "previous_volume": None,
+        "average_volume_20": None,
+        "relative_volume_20": None,
+        "rvol_20": None,
+        "volume_trend": "unknown",
+        "volume_strength": "unknown",
+        "volume_spike": False,
+        "low_volume_warning": False,
+        "breakout_volume_confirmed": None,
+        "read_only": True,
+    }
+    if not candles:
+        return unknown
+
+    latest = candles[-1]
+    previous = candles[-2] if len(candles) >= 2 else None
+    latest_volume = latest.get("volume")
+    previous_volume = previous.get("volume") if previous else None
+    sample = [
+        candle.get("volume")
+        for candle in candles[max(0, len(candles) - 21):-1]
+        if isinstance(candle.get("volume"), (int, float)) and candle.get("volume") >= 0
+    ]
+    average = sum(sample) / len(sample) if sample else None
+    rvol = (
+        latest_volume / average
+        if isinstance(latest_volume, (int, float)) and average and average > 0
+        else None
+    )
+
+    if isinstance(latest_volume, (int, float)) and isinstance(previous_volume, (int, float)):
+        if previous_volume <= 0:
+            volume_trend = "rising" if latest_volume > 0 else "flat"
+        elif latest_volume > previous_volume * 1.05:
+            volume_trend = "rising"
+        elif latest_volume < previous_volume * 0.95:
+            volume_trend = "falling"
+        else:
+            volume_trend = "flat"
+    else:
+        volume_trend = "unknown"
+
+    if rvol is None:
+        volume_strength = "unknown"
+    elif rvol >= 1.5:
+        volume_strength = "strong"
+    elif rvol >= 0.8:
+        volume_strength = "normal"
+    else:
+        volume_strength = "weak"
+
+    breakout_confirmed = None
+    if best_setup and rvol is not None:
+        reference = best_setup.get("trigger")
+        if reference is None:
+            reference = best_setup.get("level_price")
+        latest_close = latest.get("close")
+        direction = best_setup.get("direction")
+        if isinstance(reference, (int, float)) and isinstance(latest_close, (int, float)):
+            if direction == "bullish":
+                breakout_confirmed = latest_close > reference and rvol >= 1.2
+            elif direction == "bearish":
+                breakout_confirmed = latest_close < reference and rvol >= 1.2
+
+    return {
+        "latest_volume": latest_volume,
+        "previous_volume": previous_volume,
+        "average_volume_20": round(average, 2) if average is not None else None,
+        "relative_volume_20": round(rvol, 2) if rvol is not None else None,
+        "rvol_20": round(rvol, 2) if rvol is not None else None,
+        "volume_trend": volume_trend,
+        "volume_strength": volume_strength,
+        "volume_spike": bool(rvol is not None and rvol >= 2.0),
+        "low_volume_warning": bool(rvol is not None and rvol < 0.7),
+        "breakout_volume_confirmed": breakout_confirmed,
+        "read_only": True,
+    }
+
+
 def compact_intraday_ai_context(payload):
     timeframe = payload.get("timeframe")
     candles = payload.get("candles") or []
@@ -4190,6 +4273,7 @@ def compact_intraday_ai_context(payload):
         "confirmation_stage": best_setup.get("confirmation_stage") if best_setup else None,
         "setup_status": best_setup.get("status") if best_setup else confirmation_setups.get("status"),
         "risk_reward": compact_risk_reward(best_setup.get("risk_reward")) if best_setup else None,
+        "volume_context": build_ai_volume_context(candles, best_setup),
         "warnings": list(dict.fromkeys(
             (confirmation_setups.get("quality_warnings") or [])
             + (professional_context.get("warnings") or [])
@@ -4232,6 +4316,19 @@ def unknown_daily_ai_context(error=None):
         "confirmation_stage": None,
         "setup_status": "NO_SETUP",
         "risk_reward": None,
+        "volume_context": {
+            "latest_volume": None,
+            "previous_volume": None,
+            "average_volume_20": None,
+            "relative_volume_20": None,
+            "rvol_20": None,
+            "volume_trend": "unknown",
+            "volume_strength": "unknown",
+            "volume_spike": False,
+            "low_volume_warning": False,
+            "breakout_volume_confirmed": None,
+            "read_only": True,
+        },
         "warnings": [f"Daily context unavailable: {error}"] if error else ["Daily context unavailable."],
         "checks": None,
         "nearest_support": None,
@@ -4309,6 +4406,19 @@ def build_daily_ai_context(current_price=None):
             "confirmation_stage": None,
             "setup_status": "BIAS_ONLY",
             "risk_reward": None,
+            "volume_context": {
+                "latest_volume": latest.get("volume"),
+                "previous_volume": previous.get("volume") if previous else None,
+                "average_volume_20": None,
+                "relative_volume_20": None,
+                "rvol_20": None,
+                "volume_trend": "unknown",
+                "volume_strength": "unknown",
+                "volume_spike": False,
+                "low_volume_warning": False,
+                "breakout_volume_confirmed": None,
+                "read_only": True,
+            },
             "warnings": [],
             "checks": {"daily_bars": len(candles)},
             "nearest_support": None,
@@ -4708,18 +4818,35 @@ def build_fallback_direct_answer(user_message, chart_summary):
     )
 
 
-def build_current_setup_application(decision, summary, setup, risk_reward, market_context, gates):
+def build_current_setup_application(decision, summary, setup, risk_reward, market_context, gates, volume_context=None):
+    volume_context = volume_context or {}
     grade = setup.get("professional_grade") or "unrated"
     stage = setup.get("confirmation_stage") or setup.get("status") or "no setup"
     rr_grade = risk_reward.get("rr_grade") or "unavailable"
     regime = market_context.get("market_regime") or "unknown"
     market_confirmation = market_context.get("market_confirmation") or "unknown"
     marker_status = "allowed" if gates.get("allow_entry_marker") else "not allowed"
+    volume_summary = (
+        f"Volume strength is {volume_context.get('volume_strength') or 'unknown'} "
+        f"with RVOL20 {volume_context.get('rvol_20') if volume_context.get('rvol_20') is not None else 'unknown'}."
+    )
     return (
         f"Current chart decision: {decision}. Entry marker is {marker_status}. "
         f"Setup quality is {grade} with stage {stage}; risk/reward is {rr_grade}; "
-        f"market regime is {regime}; SPY/QQQ market confirmation is {market_confirmation}. {summary}"
+        f"market regime is {regime}; SPY/QQQ market confirmation is {market_confirmation}. "
+        f"{volume_summary} {summary}"
     )
+
+
+def select_review_volume_context(snapshot, setup):
+    timeframes = snapshot.get("timeframes") or {}
+    setup_timeframe = setup.get("timeframe")
+    requested_timeframe = snapshot.get("requested_timeframe")
+    for timeframe in [setup_timeframe, requested_timeframe, "5Min", "15Min", "1Min"]:
+        volume_context = (timeframes.get(timeframe) or {}).get("volume_context")
+        if volume_context:
+            return volume_context
+    return {}
 
 
 def build_fallback_ai_review(snapshot, user_message=None):
@@ -4732,10 +4859,15 @@ def build_fallback_ai_review(snapshot, user_message=None):
     grade = setup.get("professional_grade")
     stage = setup.get("confirmation_stage")
     direction = setup.get("direction") if setup.get("direction") in {"bullish", "bearish"} else "neutral"
+    volume_context = select_review_volume_context(snapshot, setup)
 
     warnings = list(gates.get("warnings") or [])
     warnings.extend(risk_reward.get("rr_warnings") or [])
     warnings.extend(market_context.get("warnings") or [])
+    if volume_context.get("low_volume_warning"):
+        warnings.append("Low RVOL: setup may lack participation; short-dated options are more vulnerable if price stalls.")
+    elif volume_context.get("volume_strength") == "weak":
+        warnings.append("Weak RVOL: setup participation is below recent activity.")
     warnings = list(dict.fromkeys(warnings))
 
     if not best_setup:
@@ -4766,6 +4898,13 @@ def build_fallback_ai_review(snapshot, user_message=None):
         confidence = min(50, int(setup.get("professional_score") or 20))
         summary = "Current setup evidence is incomplete. Wait for clearer confirmation."
 
+    if best_setup and volume_context.get("volume_strength") == "strong":
+        confidence = min(100, confidence + 5)
+    elif volume_context.get("low_volume_warning"):
+        confidence = max(0, confidence - 10)
+    elif volume_context.get("volume_strength") == "weak":
+        confidence = max(0, confidence - 5)
+
     direct_answer = build_fallback_direct_answer(user_message, summary)
     application_to_current_setup = build_current_setup_application(
         decision,
@@ -4774,6 +4913,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
         risk_reward,
         market_context,
         gates,
+        volume_context,
     )
 
     entry_conditions = []
@@ -4816,6 +4956,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
         "market_confirmation": market_context.get("market_confirmation"),
         "gate_checks": gates.get("checks"),
         "extension": gates.get("extension"),
+        "volume_context": volume_context,
         "user_message": user_message,
         "read_only": True,
     }
@@ -4837,10 +4978,20 @@ def build_fallback_ai_review(snapshot, user_message=None):
             warning for warning in warnings
             if any(term in warning.lower() for term in ["trap", "sweep", "failed", "invalid", "oppos", "chop"])
         ],
-        "options_risk_notes": [
+        "options_risk_notes": list(dict.fromkeys([
             "Short-dated and 0DTE options can decay quickly if the setup stalls or chops.",
             "A correct stock direction can still disappoint because of timing, implied volatility, spreads, and slippage.",
-        ],
+            *(
+                ["Low RVOL increases stall and chop risk for short-dated options."]
+                if volume_context.get("low_volume_warning")
+                else []
+            ),
+            *(
+                ["Volume spike confirms participation alongside the setup direction."]
+                if volume_context.get("volume_spike") and volume_context.get("breakout_volume_confirmed")
+                else []
+            ),
+        ])),
         "exit_plan": {
             "invalidation": risk_reward.get("invalidation"),
             "target_1": risk_reward.get("target_1"),
@@ -4982,6 +5133,9 @@ def call_openai_trade_review(snapshot, user_message=None):
         "Do not invent rules or facts outside the structured backend snapshot. "
         "The deterministic chart engine, snapshot, and backend hard gates are the source of truth. "
         "If educational doctrine and current chart data appear to conflict, chart data and backend gates win. "
+        "Use each intraday timeframe's volume_context as confirmation and risk context only. Mention strong or weak "
+        "volume when relevant, but never treat volume as a standalone trade signal or let it override marker gates. "
+        "For short-dated and 0DTE options, low RVOL increases stall and chop risk. "
         "When user_message is provided, answer the user's exact question first in direct_answer, then explain how "
         "it applies to the current AAPL snapshot in application_to_current_setup. If asked about reliable sources, "
         "explicitly mention the OCC Options Disclosure Document, FINRA options investor education, Cboe Options "

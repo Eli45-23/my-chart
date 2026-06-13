@@ -151,6 +151,18 @@ AAPL can move in the expected direction while the option performs poorly because
 
 Fast, clean, sustained movement is generally more favorable for short-dated options than slow, overlapping, indecisive movement. Chop is dangerous because repeated reversals, time decay, and spreads can damage the contract even if the broader directional idea is eventually correct.
 
+## Volume and RVOL Confirmation
+
+Volume helps confirm whether meaningful participation supports current price action. Relative volume (`RVOL`) compares current candle activity with recent activity and helps distinguish an active move from a move that may lack participation.
+
+- Breakouts without supporting volume are less trustworthy.
+- Low volume combined with chop is especially dangerous for short-dated and 0DTE options because price may stall while theta, spread, and slippage continue to matter.
+- Strong volume can increase confidence only when structure, confirmation stage, risk/reward, market regime, and SPY/QQQ context also agree.
+- Weak volume should reduce confidence and warn that the setup may lack participation.
+- A volume spike is confirmation only when it supports the active setup direction.
+- Volume is confirmation and risk context, never a standalone entry signal.
+- Volume must never create an entry marker or override deterministic backend gates.
+
 ## 4. Price Action and Trend Principles
 
 ### Trend Continuation
