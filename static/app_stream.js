@@ -42,6 +42,8 @@ const COLORS = {
   weakSupport: "#40566b",
   supply: "#ff4d6d",
   demand: "#00c853",
+  weakSupply: "#6b414a",
+  weakDemand: "#356145",
   trigger: "#ffd600",
   invalidation: "#9e9e9e",
   liquiditySweep: "#d500f9",
@@ -137,11 +139,29 @@ function isLayerVisible(layer) {
 }
 
 function isWeakZone(zone) {
-  return (zone?.label || "").includes("Weak Zone");
+  return zone?.zone_quality_grade === "WEAK" || (zone?.label || "").includes("Weak Zone");
 }
 
 function chartSupplyDemandZones(zones) {
-  return (zones || []).filter(zone => !(isWeakZone(zone) && (cleanMode || !layerState.weakZones)));
+  const available = zones || [];
+
+  if (cleanMode) {
+    const strong = available.filter(zone => ["A", "B"].includes(zone.zone_quality_grade));
+    if (strong.length) return strong;
+
+    const currentPrice = latestPayload?.current_price || latestPayload?.latest_trade?.price;
+    const cZones = available
+      .filter(zone => zone.zone_quality_grade === "C")
+      .sort((a, b) => {
+        if (currentPrice === null || currentPrice === undefined) return 0;
+        const aMid = (Number(a.low) + Number(a.high)) / 2;
+        const bMid = (Number(b.low) + Number(b.high)) / 2;
+        return Math.abs(aMid - currentPrice) - Math.abs(bMid - currentPrice);
+      });
+    return cZones.length ? [cZones[0]] : [];
+  }
+
+  return available.filter(zone => !(isWeakZone(zone) && !layerState.weakZones));
 }
 
 function updateCleanModeControl() {
@@ -193,16 +213,18 @@ function addZoneBand(label, zone, colors) {
   if (low === null || low === undefined || high === null || high === undefined) return;
 
   const quality = zone.label || "Zone";
+  const weak = zone.zone_quality_grade === "WEAK";
+  const style = weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed;
 
-  addLevel(`${label} High ${quality}`, high, colors.zone, LightweightCharts.LineStyle.Dotted);
-  addLevel(`${label} Low ${quality}`, low, colors.zone, LightweightCharts.LineStyle.Dotted);
+  addLevel(`${label} High ${quality}`, high, colors.zone, LightweightCharts.LineStyle.Dotted, !weak);
+  addLevel(`${label} Low ${quality}`, low, colors.zone, LightweightCharts.LineStyle.Dotted, !weak);
 
   if (zone.trigger !== null && zone.trigger !== undefined) {
-    addLevel(`${label} Trigger`, zone.trigger, COLORS.trigger, LightweightCharts.LineStyle.Dashed);
+    addLevel(`${label} Trigger`, zone.trigger, weak ? colors.zone : COLORS.trigger, style, !weak);
   }
 
   if (zone.invalidation !== null && zone.invalidation !== undefined) {
-    addLevel(`${label} Invalid`, zone.invalidation, COLORS.invalidation, LightweightCharts.LineStyle.Dotted);
+    addLevel(`${label} Invalid`, zone.invalidation, COLORS.invalidation, LightweightCharts.LineStyle.Dotted, !weak);
   }
 }
 
@@ -338,8 +360,8 @@ function updateLegend(data) {
   const stream = latestPayload.stream_status || {};
   const trade = latestPayload.latest_trade;
   const setups = latestPayload.confirmation_setups?.setups || [];
-  const demandZones = (latestPayload.supply_demand?.demand || []).filter(zone => !(cleanMode && isWeakZone(zone)));
-  const supplyZones = (latestPayload.supply_demand?.supply || []).filter(zone => !(cleanMode && isWeakZone(zone)));
+  const demandZones = chartSupplyDemandZones(latestPayload.supply_demand?.demand);
+  const supplyZones = chartSupplyDemandZones(latestPayload.supply_demand?.supply);
   const bestSetup = setups.reduce((best, setup) => {
     const score = setup.professional_score ?? setup.score ?? 0;
     const bestScore = best?.professional_score ?? best?.score ?? -1;
@@ -364,8 +386,8 @@ function updateLegend(data) {
       ...(latestPayload.structure_reactions?.resistance_watch || []).map(z => `Watch R ${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.score || ""}`),
       ...(latestPayload.structure_reactions?.support_watch || []).map(z => `Watch S ${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.score || ""}`),
     ].join(" | ") || "none"}`),
-    textPill(`Demand: ${demandZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.label || ""} ${z.reliability_score || ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
-    textPill(`Supply: ${supplyZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.label || ""} ${z.reliability_score || ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
+    textPill(`Demand: ${demandZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.zone_quality_grade || ""} ${z.zone_quality_score ?? ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
+    textPill(`Supply: ${supplyZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.zone_quality_grade || ""} ${z.zone_quality_score ?? ""} T:${z.trigger?.toFixed(2) || "n/a"}`).join(", ") || "none"}`),
     cleanMode ? "" : textPill(`Upside Sweep: ${(latestPayload.liquidity_sweeps?.upside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
     cleanMode ? "" : textPill(`Downside Sweep: ${(latestPayload.liquidity_sweeps?.downside || []).map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.source || ""}`).join(", ") || "none"}`),
     cleanMode ? "" : textPill(`Clusters: ${(latestPayload.level_clusters?.clusters || []).map(c => `${c.low.toFixed(2)}-${c.high.toFixed(2)} ${c.label || ""}`).join(" | ") || "none"}`),
@@ -471,11 +493,11 @@ function drawStaticLevels(data) {
     const sd = data.supply_demand || {};
 
     chartSupplyDemandZones(sd.supply).forEach((zone, index) => {
-      addZoneBand(`Supply ${index + 1}`, zone, { zone: COLORS.supply });
+      addZoneBand(`Supply ${index + 1}`, zone, { zone: isWeakZone(zone) ? COLORS.weakSupply : COLORS.supply });
     });
 
     chartSupplyDemandZones(sd.demand).forEach((zone, index) => {
-      addZoneBand(`Demand ${index + 1}`, zone, { zone: COLORS.demand });
+      addZoneBand(`Demand ${index + 1}`, zone, { zone: isWeakZone(zone) ? COLORS.weakDemand : COLORS.demand });
     });
   }
 
@@ -631,6 +653,7 @@ toggleButtons.forEach((btn) => {
 
     if (latestPayload) {
       drawStaticLevels(latestPayload);
+      updateLegend(latestPayload);
     }
 
     applyIndicatorVisibility();

@@ -386,7 +386,7 @@ def detect_supply_demand_zones(candles, current_price=None, timeframe="1Min"):
                     center["time"],
                 )
 
-                if zone and zone["quality_score"] >= min_quality:
+                if zone and zone["quality_score"] >= max(30, min_quality - 25):
                     zone["timeframe"] = timeframe
                     zone["rule_set"] = label_suffix
                     zone["label"] = f"{zone['label']} / {label_suffix}"
@@ -415,7 +415,7 @@ def detect_supply_demand_zones(candles, current_price=None, timeframe="1Min"):
                     center["time"],
                 )
 
-                if zone and zone["quality_score"] >= min_quality:
+                if zone and zone["quality_score"] >= max(30, min_quality - 25):
                     zone["timeframe"] = timeframe
                     zone["rule_set"] = label_suffix
                     zone["label"] = f"{zone['label']} / {label_suffix}"
@@ -796,47 +796,157 @@ def reliability_grade(score):
     return "Hidden"
 
 
-def final_zone_reliability(zone):
-    score = int(zone.get("display_score", zone.get("quality_score", 0)) or 0)
+def zone_quality_grade(score):
+    if score >= 80:
+        return "A"
+    if score >= 65:
+        return "B"
+    if score >= 50:
+        return "C"
+    return "WEAK"
 
-    # Stronger if higher timeframe confirmed.
-    if zone.get("higher_timeframe_confirmed"):
-        score += 8
 
-    # Stronger if regular-session.
-    if zone.get("session_confidence") == "regular_session_confirmed":
-        score += 6
-
-    # Stronger if it actually caused follow-through.
-    if zone.get("caused_follow_through"):
-        score += 8
-
-    # Downgrade if already hit too many times.
+def final_zone_reliability(
+    zone,
+    levels=None,
+    vwap=None,
+    support_resistance=None,
+    level_clusters=None,
+    atr14=None,
+):
+    levels = levels or {}
+    support_resistance = support_resistance or {"support": [], "resistance": []}
+    level_clusters = level_clusters or {"clusters": []}
+    low = zone.get("low")
+    high = zone.get("high")
+    width = max(0, (high or 0) - (low or 0))
     touches = int(zone.get("touches", 0) or 0)
-    if touches >= 3:
-        score -= 10
 
-    # Downgrade broken zones hard.
+    base_freshness = int(zone.get("freshness_score", 0) or 0)
+    freshness_score = max(0, min(100, base_freshness - touches * 15))
+
+    if touches == 0:
+        retest_score = 100
+    elif touches == 1:
+        retest_score = 85
+    elif touches == 2:
+        retest_score = 65
+    elif touches == 3:
+        retest_score = 35
+    else:
+        retest_score = 10
+
+    if atr14 and atr14 > 0:
+        width_ratio = width / atr14
+        if width_ratio <= 0.35:
+            width_score = 100
+        elif width_ratio <= 0.60:
+            width_score = 80
+        elif width_ratio <= 1.0:
+            width_score = 55
+        elif width_ratio <= 1.5:
+            width_score = 30
+        else:
+            width_score = 10
+    else:
+        width_score = max(10, 100 - int(width * 250))
+
+    tolerance = max(0.04, (atr14 or 0) * 0.20)
+    confluence_labels = []
+
+    def overlaps_price(price):
+        return price is not None and low is not None and high is not None and low - tolerance <= price <= high + tolerance
+
+    for label, price in [
+        ("PMH", levels.get("pmh")),
+        ("PML", levels.get("pml")),
+        ("PDH", levels.get("pdh")),
+        ("PDL", levels.get("pdl")),
+        ("PDC", levels.get("pdc")),
+        ("VWAP", vwap),
+    ]:
+        if overlaps_price(price):
+            confluence_labels.append(label)
+
+    for side in ["support", "resistance"]:
+        for level in support_resistance.get(side, []) or []:
+            if level.get("quality_grade") in {"A", "B"} and overlaps_price(level.get("price")):
+                confluence_labels.append(f"{level.get('quality_grade')} {side}")
+                break
+
+    for cluster in level_clusters.get("clusters", []) or []:
+        if ranges_overlap(low, high, cluster.get("low"), cluster.get("high")):
+            confluence_labels.append("Level cluster")
+            break
+
+    confluence_labels = list(dict.fromkeys(confluence_labels))
+    confluence_score = min(100, len(confluence_labels) * 35)
+
+    impulse_score = int(zone.get("impulse_score", 0) or 0)
+    reaction_score = int(zone.get("reaction_score", 0) or 0)
+    volume_score = int(zone.get("volume_score", 0) or 0)
+
+    score = int(
+        freshness_score * 0.18 +
+        impulse_score * 0.20 +
+        reaction_score * 0.20 +
+        retest_score * 0.15 +
+        volume_score * 0.10 +
+        width_score * 0.08 +
+        confluence_score * 0.09
+    )
+
+    if zone.get("higher_timeframe_confirmed"):
+        score += 6
+    if zone.get("caused_follow_through"):
+        score += 5
     if zone.get("broken_through"):
-        score -= 35
-
-    # Premarket zones are lower confidence unless htf confirms.
+        score -= 40
     if zone.get("session_confidence") == "premarket_low_confidence" and not zone.get("higher_timeframe_confirmed"):
-        score -= 8
+        score -= 6
 
     score = max(0, min(100, score))
-    grade = reliability_grade(score)
+    grade = zone_quality_grade(score)
+
+    reasons = [
+        f"freshness {freshness_score}/100",
+        f"impulse {impulse_score}/100",
+        f"reaction {reaction_score}/100",
+        f"retests {touches}",
+        f"volume {volume_score}/100",
+        f"width {width_score}/100",
+    ]
+    if confluence_labels:
+        reasons.append(f"confluence: {', '.join(confluence_labels)}")
+    if touches >= 3:
+        reasons.append("many retests weaken zone")
+    if zone.get("higher_timeframe_confirmed"):
+        reasons.append("higher timeframe confirmed")
+    if zone.get("broken_through"):
+        reasons.append("zone was broken")
 
     zone = dict(zone)
     zone.update({
+        "freshness_score": freshness_score,
+        "impulse_score": impulse_score,
+        "reaction_score": reaction_score,
+        "retest_score": retest_score,
+        "volume_score": volume_score,
+        "width_score": width_score,
+        "confluence_score": confluence_score,
+        "zone_quality_score": score,
+        "zone_quality_grade": grade,
+        "zone_quality_reasons": reasons,
         "reliability_score": score,
         "reliability_grade": grade,
-        "worth_showing": score >= 60 and not zone.get("broken_through", False),
+        "display_score": score,
+        "worth_showing": not zone.get("broken_through", False),
+        "read_only": True,
     })
 
     # Make label cleaner.
     base = zone.get("label", "")
-    if "Weak Zone" in base and score >= 60:
+    if "Weak Zone" in base and score >= 50:
         base = base.replace("Weak Zone", f"{grade} Zone")
     elif "B Zone" in base or "A Zone" in base or "A+ Zone" in base:
         parts = base.split("/")
@@ -850,7 +960,14 @@ def final_zone_reliability(zone):
     return zone
 
 
-def filter_reliable_supply_demand(supply_demand):
+def filter_reliable_supply_demand(
+    supply_demand,
+    levels=None,
+    vwap=None,
+    support_resistance=None,
+    level_clusters=None,
+    atr14=None,
+):
     result = {
         "demand": [],
         "supply": [],
@@ -859,14 +976,23 @@ def filter_reliable_supply_demand(supply_demand):
 
     for side in ["demand", "supply"]:
         for zone in supply_demand.get(side, []) or []:
-            z = final_zone_reliability(zone)
+            z = final_zone_reliability(
+                zone,
+                levels=levels,
+                vwap=vwap,
+                support_resistance=support_resistance,
+                level_clusters=level_clusters,
+                atr14=atr14,
+            )
             if z["worth_showing"]:
                 result[side].append(z)
 
-    result["demand"] = sorted(result["demand"], key=lambda z: -z.get("reliability_score", 0))[:2]
-    result["supply"] = sorted(result["supply"], key=lambda z: -z.get("reliability_score", 0))[:2]
+    result["demand"] = sorted(result["demand"], key=lambda z: -z.get("zone_quality_score", 0))[:4]
+    result["supply"] = sorted(result["supply"], key=lambda z: -z.get("zone_quality_score", 0))[:4]
 
-    result["meta"]["reliability_filter"] = "show B-or-better unbroken zones by default"
+    result["meta"]["zone_quality_rule"] = "Weighted freshness, impulse, reaction, retests, volume, width, and confluence"
+    result["meta"]["zone_quality_grades"] = {"A": "80-100", "B": "65-79", "C": "50-64", "WEAK": "below 50"}
+    result["meta"]["read_only"] = True
     return result
 
 
@@ -2258,6 +2384,7 @@ def strict_trade_quality_grade(setup, professional_context):
     volume_confirmed = bool(setup.get("volume_confirmed"))
     market_aligned = bool(setup.get("market_aligned"))
     level_quality_grade_value = setup.get("level_quality_grade")
+    zone_quality_grade_value = setup.get("zone_quality_grade")
 
     spy_agrees = trend_label_matches_direction(spy_trend, direction)
     qqq_agrees = trend_label_matches_direction(qqq_trend, direction)
@@ -2287,6 +2414,8 @@ def strict_trade_quality_grade(setup, professional_context):
         warnings.append("Volume not confirmed.")
     if setup.get("kind") in {"support", "resistance"} and level_quality_grade_value == "WEAK":
         warnings.append("Support/resistance level quality is weak.")
+    if setup.get("kind") in {"supply", "demand"} and zone_quality_grade_value == "WEAK":
+        warnings.append("Supply/demand zone quality is weak.")
 
     hard_no_trade = (
         status == "INVALIDATED"
@@ -2368,6 +2497,13 @@ def strict_trade_quality_grade(setup, professional_context):
             score = min(100, score + 4)
         elif level_quality_grade_value == "WEAK":
             score = max(0, score - 12)
+    if setup.get("kind") in {"supply", "demand"}:
+        if zone_quality_grade_value == "A":
+            score = min(100, score + 8)
+        elif zone_quality_grade_value == "B":
+            score = min(100, score + 4)
+        elif zone_quality_grade_value == "WEAK":
+            score = max(0, score - 12)
 
     if hard_no_trade:
         grade = "NO_TRADE"
@@ -2405,6 +2541,8 @@ def strict_trade_quality_grade(setup, professional_context):
             "qqq_agrees": qqq_agrees,
             "level_quality_grade": level_quality_grade_value,
             "level_quality_score": setup.get("level_quality_score"),
+            "zone_quality_grade": zone_quality_grade_value,
+            "zone_quality_score": setup.get("zone_quality_score"),
         },
         "read_only": True,
     }
@@ -2503,7 +2641,7 @@ def build_risk_reward_targets(direction, entry, levels=None, support_resistance=
             add(level.get("price"), f"R{idx + 1}", "resistance", level.get("quality_grade"), level.get("quality_score"))
 
         for idx, zone in enumerate(supply_demand.get("supply", []) or []):
-            add(zone.get("low"), f"Supply {idx + 1}", "supply")
+            add(zone.get("low"), f"Supply {idx + 1}", "supply", zone.get("zone_quality_grade"), zone.get("zone_quality_score"))
 
         for idx, cluster in enumerate(level_clusters.get("clusters", []) or []):
             if cluster.get("kind") == "upside":
@@ -2517,7 +2655,7 @@ def build_risk_reward_targets(direction, entry, levels=None, support_resistance=
             add(level.get("price"), f"S{idx + 1}", "support", level.get("quality_grade"), level.get("quality_score"))
 
         for idx, zone in enumerate(supply_demand.get("demand", []) or []):
-            add(zone.get("high"), f"Demand {idx + 1}", "demand")
+            add(zone.get("high"), f"Demand {idx + 1}", "demand", zone.get("zone_quality_grade"), zone.get("zone_quality_score"))
 
         for idx, cluster in enumerate(level_clusters.get("clusters", []) or []):
             if cluster.get("kind") == "downside":
@@ -2532,7 +2670,7 @@ def build_risk_reward_targets(direction, entry, levels=None, support_resistance=
     target_candidates = list(unique.values())
     preferred_candidates = [
         candidate for candidate in target_candidates
-        if candidate.get("kind") not in {"support", "resistance"} or candidate.get("quality_grade") != "WEAK"
+        if candidate.get("kind") not in {"support", "resistance", "supply", "demand"} or candidate.get("quality_grade") != "WEAK"
     ]
     if preferred_candidates:
         target_candidates = preferred_candidates
@@ -2670,7 +2808,11 @@ def calculate_setup_risk_reward(
     if not opposing_levels:
         warnings.append("no clean target found")
     if targets and targets[0].get("quality_grade") == "WEAK":
-        warnings.append("Target level is weak.")
+        if targets[0].get("kind") in {"supply", "demand"}:
+            warnings.append("Target zone is weak.")
+            warnings.append("Opposing zone is weak.")
+        else:
+            warnings.append("Target level is weak.")
     if setup.get("professional_grade") == "NO_TRADE":
         warnings.append("setup is NO_TRADE")
     if setup.get("status") != "CONFIRMED":
@@ -2791,10 +2933,16 @@ def build_confirmation_level_candidates(levels=None, support_resistance=None, su
         )
 
     for idx, z in enumerate(supply_demand.get("supply", []) or []):
-        add("upside", z.get("high"), f"Supply {idx + 1}", "supply", low=z.get("low"), high=z.get("high"), confidence=z.get("label"))
+        add(
+            "upside", z.get("high"), f"Supply {idx + 1}", "supply", low=z.get("low"), high=z.get("high"), confidence=z.get("label"),
+            quality_score=z.get("zone_quality_score"), quality_grade=z.get("zone_quality_grade"), quality_reasons=z.get("zone_quality_reasons"),
+        )
 
     for idx, z in enumerate(supply_demand.get("demand", []) or []):
-        add("downside", z.get("low"), f"Demand {idx + 1}", "demand", low=z.get("low"), high=z.get("high"), confidence=z.get("label"))
+        add(
+            "downside", z.get("low"), f"Demand {idx + 1}", "demand", low=z.get("low"), high=z.get("high"), confidence=z.get("label"),
+            quality_score=z.get("zone_quality_score"), quality_grade=z.get("zone_quality_grade"), quality_reasons=z.get("zone_quality_reasons"),
+        )
 
     return candidates
 
@@ -2966,6 +3114,9 @@ def detect_confirmation_setups(candles, current_price=None, levels=None, support
                 "level_quality_score": level.get("quality_score"),
                 "level_quality_grade": level.get("quality_grade"),
                 "level_quality_reasons": level.get("quality_reasons", []),
+                "zone_quality_score": level.get("quality_score") if level.get("kind") in {"supply", "demand"} else None,
+                "zone_quality_grade": level.get("quality_grade") if level.get("kind") in {"supply", "demand"} else None,
+                "zone_quality_reasons": level.get("quality_reasons", []) if level.get("kind") in {"supply", "demand"} else [],
                 "interaction": interaction,
                 "trigger": trigger,
                 "invalidation": invalidation,
@@ -3246,6 +3397,34 @@ def chart_data():
             levels=levels,
             vwap=latest_vwap,
             supply_demand=supply_demand,
+            level_clusters=level_clusters,
+            atr14=latest_atr14,
+        )
+
+        raw_liquidity_sweeps = build_liquidity_sweep_zones(
+            current_price,
+            levels=levels,
+            support_resistance=support_resistance,
+            supply_demand=supply_demand,
+        )
+        liquidity_sweeps = filter_reliable_liquidity_sweeps(
+            raw_liquidity_sweeps,
+            support_resistance=support_resistance,
+            supply_demand=supply_demand,
+        )
+        level_clusters = build_level_clusters(
+            current_price,
+            levels=levels,
+            support_resistance=support_resistance,
+            supply_demand=supply_demand,
+            liquidity_sweeps=liquidity_sweeps,
+        )
+
+        supply_demand = filter_reliable_supply_demand(
+            enhanced_supply_demand,
+            levels=levels,
+            vwap=latest_vwap,
+            support_resistance=support_resistance,
             level_clusters=level_clusters,
             atr14=latest_atr14,
         )
