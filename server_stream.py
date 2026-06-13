@@ -22,6 +22,7 @@ SYMBOL = "AAPL"
 ALPACA_KEY = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
 DATA_BASE_URL = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets")
+TRADING_BASE_URL = os.getenv("ALPACA_TRADING_BASE_URL") or os.getenv("APCA_API_BASE_URL") or "https://api.alpaca.markets"
 FEED = os.getenv("ALPACA_STOCK_FEED", "sip").lower()
 
 TIMEFRAMES = {
@@ -128,6 +129,58 @@ def fetch_bars(symbol, start, end, timeframe="1Min", limit=10000):
     response = requests.get(url, headers=get_headers(), params=params, timeout=20)
     response.raise_for_status()
     return response.json().get("bars") or []
+
+
+def fetch_alpaca_option_contracts(symbol, expiration=None):
+    today = datetime.now(ET).date()
+    params = {
+        "underlying_symbols": symbol,
+        "status": "active",
+        "expiration_date_gte": expiration or today.isoformat(),
+        "expiration_date_lte": expiration or (today + timedelta(days=14)).isoformat(),
+        "limit": 1000,
+    }
+    bases = [TRADING_BASE_URL.rstrip("/")]
+    alternate = "https://paper-api.alpaca.markets" if "paper-api." not in bases[0] else "https://api.alpaca.markets"
+    if alternate not in bases:
+        bases.append(alternate)
+
+    last_error = None
+    for base in bases:
+        try:
+            response = requests.get(
+                f"{base}/v2/options/contracts",
+                headers=get_headers(),
+                params=params,
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            contracts = payload.get("option_contracts") or payload.get("contracts") or []
+            return contracts if isinstance(contracts, list) else []
+        except requests.HTTPError as error:
+            last_error = error
+            if error.response is None or error.response.status_code not in {401, 403}:
+                break
+    if last_error:
+        raise last_error
+    return []
+
+
+def fetch_alpaca_option_snapshots(option_symbols):
+    symbols = [symbol for symbol in option_symbols or [] if symbol][:100]
+    if not symbols:
+        return {}
+    response = requests.get(
+        f"{DATA_BASE_URL.rstrip('/')}/v1beta1/options/snapshots",
+        headers=get_headers(),
+        params={"symbols": ",".join(symbols), "limit": len(symbols)},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    snapshots = payload.get("snapshots") or payload.get("option_snapshots") or {}
+    return snapshots if isinstance(snapshots, dict) else {}
 
 
 def today_et():
@@ -4488,6 +4541,242 @@ def chart_payload_for_ai(timeframe):
     return response.get_json()
 
 
+def option_number(value):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def option_contract_type(contract):
+    contract_type = str(contract.get("type") or contract.get("option_type") or "").lower()
+    return contract_type if contract_type in {"call", "put"} else None
+
+
+def select_ai_option_contracts(symbol, underlying_price, setup_direction, contracts):
+    candidates = [
+        contract for contract in contracts or []
+        if (contract.get("underlying_symbol") or contract.get("root_symbol")) == symbol
+        and option_contract_type(contract) in {"call", "put"}
+        and option_number(contract.get("strike_price") or contract.get("strike")) is not None
+        and (contract.get("expiration_date") or contract.get("expiration"))
+    ]
+    if not candidates or not valid_number(underlying_price):
+        return {"selected_expiration": None, "call": None, "put": None}
+
+    expirations = sorted({str(contract.get("expiration_date") or contract.get("expiration")) for contract in candidates})
+    selected_expiration = expirations[0]
+    expiration_contracts = [
+        contract for contract in candidates
+        if str(contract.get("expiration_date") or contract.get("expiration")) == selected_expiration
+    ]
+
+    def selection_score(contract):
+        strike = option_number(contract.get("strike_price") or contract.get("strike"))
+        contract_type = option_contract_type(contract)
+        distance = abs(strike - underlying_price)
+        direction_match = (
+            (setup_direction == "bullish" and contract_type == "call")
+            or (setup_direction == "bearish" and contract_type == "put")
+        )
+        directionally_itm = direction_match and (
+            (contract_type == "call" and strike <= underlying_price)
+            or (contract_type == "put" and strike >= underlying_price)
+        )
+        return (distance, 0 if directionally_itm else 1)
+
+    selected = {}
+    for contract_type in ["call", "put"]:
+        side = [contract for contract in expiration_contracts if option_contract_type(contract) == contract_type]
+        selected[contract_type] = min(side, key=selection_score) if side else None
+    selected["selected_expiration"] = selected_expiration
+    return selected
+
+
+def grade_option_contract_quality(contract_snapshot):
+    bid = option_number(contract_snapshot.get("bid"))
+    ask = option_number(contract_snapshot.get("ask"))
+    volume = option_number(contract_snapshot.get("volume"))
+    open_interest = option_number(contract_snapshot.get("open_interest"))
+    implied_volatility = option_number(contract_snapshot.get("implied_volatility"))
+    dte = contract_snapshot.get("dte")
+    warnings = []
+
+    if bid is None or ask is None or bid < 0 or ask <= 0 or ask < bid:
+        grade = "BAD" if bid is not None or ask is not None else "UNKNOWN"
+        warnings.append("Bid/ask quote is missing or invalid.")
+    else:
+        mid = (bid + ask) / 2
+        spread_percent = ((ask - bid) / mid * 100) if mid > 0 else None
+        if spread_percent is None:
+            grade = "UNKNOWN"
+        elif spread_percent <= 5:
+            grade = "GOOD"
+        elif spread_percent <= 10:
+            grade = "OK"
+        elif spread_percent <= 20:
+            grade = "WEAK"
+            warnings.append("Wide bid/ask spread may increase slippage.")
+        else:
+            grade = "BAD"
+            warnings.append("Wide bid/ask spread increases slippage and bad-fill risk.")
+
+    if volume is not None and volume < 100:
+        warnings.append("Low option volume may reduce liquidity.")
+    if open_interest is not None and open_interest < 100:
+        warnings.append("Low open interest may reduce liquidity.")
+    if isinstance(dte, int) and dte <= 1:
+        warnings.append(f"{dte}DTE contract has fast theta-decay risk.")
+    if implied_volatility is not None and implied_volatility >= 0.75:
+        warnings.append("High implied volatility increases premium and IV-compression risk.")
+
+    return {"liquidity_grade": grade, "contract_quality_warnings": list(dict.fromkeys(warnings))}
+
+
+def compact_option_contract(contract, raw_snapshot, underlying_price, dte):
+    contract_type = option_contract_type(contract)
+    strike = option_number(contract.get("strike_price") or contract.get("strike"))
+    expiration = contract.get("expiration_date") or contract.get("expiration")
+    quote = raw_snapshot.get("latestQuote") or raw_snapshot.get("latest_quote") or {}
+    trade = raw_snapshot.get("latestTrade") or raw_snapshot.get("latest_trade") or {}
+    greeks = raw_snapshot.get("greeks") or {}
+    daily_bar = raw_snapshot.get("dailyBar") or raw_snapshot.get("daily_bar") or {}
+    bid = option_number(quote.get("bp") if "bp" in quote else quote.get("bid_price"))
+    ask = option_number(quote.get("ap") if "ap" in quote else quote.get("ask_price"))
+    mid = (bid + ask) / 2 if bid is not None and ask is not None and ask >= bid else None
+    spread = ask - bid if bid is not None and ask is not None and ask >= bid else None
+    spread_percent = spread / mid * 100 if spread is not None and mid and mid > 0 else None
+    distance = strike - underlying_price if strike is not None and valid_number(underlying_price) else None
+
+    if distance is None or contract_type is None:
+        moneyness = "UNKNOWN"
+    elif abs(distance) <= max(0.5, underlying_price * 0.0025):
+        moneyness = "ATM"
+    elif (contract_type == "call" and distance < 0) or (contract_type == "put" and distance > 0):
+        moneyness = "ITM"
+    else:
+        moneyness = "OTM"
+
+    compact = {
+        "symbol": contract.get("symbol"),
+        "expiration": str(expiration) if expiration else None,
+        "strike": round_price(strike),
+        "type": contract_type,
+        "bid": round_price(bid),
+        "ask": round_price(ask),
+        "mid": round_price(mid),
+        "spread": round_price(spread),
+        "spread_percent": round(spread_percent, 2) if spread_percent is not None else None,
+        "last_price": round_price(option_number(trade.get("p") if "p" in trade else trade.get("price"))),
+        "delta": option_number(greeks.get("delta")),
+        "theta": option_number(greeks.get("theta")),
+        "implied_volatility": option_number(
+            raw_snapshot.get("impliedVolatility")
+            if "impliedVolatility" in raw_snapshot
+            else raw_snapshot.get("implied_volatility")
+        ),
+        "volume": option_number(daily_bar.get("v") if "v" in daily_bar else daily_bar.get("volume")),
+        "open_interest": option_number(contract.get("open_interest")),
+        "moneyness": moneyness,
+        "distance_from_underlying": round_price(distance),
+        "dte": dte,
+        "read_only": True,
+    }
+    compact.update(grade_option_contract_quality(compact))
+    return compact
+
+
+def unavailable_option_chain_context(snapshot, reason):
+    setup = snapshot.get("best_setup") or {}
+    return {
+        "symbol": snapshot.get("symbol") or SYMBOL,
+        "available": False,
+        "source": "unavailable",
+        "reason": str(reason),
+        "underlying_price": snapshot.get("current_price"),
+        "selected_expiration": None,
+        "dte": None,
+        "setup_direction": setup.get("direction") if setup.get("direction") in {"bullish", "bearish"} else "neutral",
+        "contracts": {"call": None, "put": None},
+        "liquidity_summary": {
+            "best_available_side": "none",
+            "overall_quality": "UNKNOWN",
+            "warnings": [str(reason)],
+        },
+        "warnings": [str(reason)],
+        "read_only": True,
+    }
+
+
+def build_ai_option_chain_context(snapshot):
+    session = snapshot.get("market_session_status") or build_market_session_status()
+    if not session.get("is_market_open_for_trading"):
+        return unavailable_option_chain_context(snapshot, "Market is closed; live option snapshots may be stale.")
+    underlying_price = snapshot.get("current_price")
+    if not valid_number(underlying_price):
+        return unavailable_option_chain_context(snapshot, "Underlying price is unavailable.")
+
+    setup = snapshot.get("best_setup") or {}
+    direction = setup.get("direction") if setup.get("direction") in {"bullish", "bearish"} else "neutral"
+    try:
+        contracts = fetch_alpaca_option_contracts(snapshot.get("symbol") or SYMBOL)
+        selected = select_ai_option_contracts(snapshot.get("symbol") or SYMBOL, underlying_price, direction, contracts)
+        expiration = selected.get("selected_expiration")
+        if not expiration:
+            return unavailable_option_chain_context(snapshot, "No active Alpaca option contracts were returned.")
+        expiration_date = datetime.fromisoformat(expiration).date()
+        dte = max(0, (expiration_date - datetime.now(ET).date()).days)
+        symbols = [
+            contract.get("symbol")
+            for contract in [selected.get("call"), selected.get("put")]
+            if contract and contract.get("symbol")
+        ]
+        snapshots = fetch_alpaca_option_snapshots(symbols)
+        compact_contracts = {
+            side: (
+                compact_option_contract(contract, snapshots.get(contract.get("symbol")) or {}, underlying_price, dte)
+                if contract and snapshots.get(contract.get("symbol")) else None
+            )
+            for side, contract in [("call", selected.get("call")), ("put", selected.get("put"))]
+        }
+        available_sides = [side for side, contract in compact_contracts.items() if contract]
+        grades = [compact_contracts[side]["liquidity_grade"] for side in available_sides]
+        grade_rank = {"BAD": 0, "WEAK": 1, "UNKNOWN": 2, "OK": 3, "GOOD": 4}
+        overall_quality = max(grades, key=lambda grade: grade_rank.get(grade, 0)) if grades else "UNKNOWN"
+        best_sides = [
+            side for side in available_sides
+            if compact_contracts[side]["liquidity_grade"] == overall_quality
+        ]
+        warnings = list(dict.fromkeys(
+            warning
+            for contract in compact_contracts.values()
+            if contract
+            for warning in contract.get("contract_quality_warnings", [])
+        ))
+        best_available_side = "both" if len(best_sides) == 2 else (best_sides[0] if best_sides else "none")
+        return {
+            "symbol": snapshot.get("symbol") or SYMBOL,
+            "available": bool(available_sides),
+            "source": "alpaca" if available_sides else "unavailable",
+            "reason": None if available_sides else "Selected contract snapshots were unavailable.",
+            "underlying_price": underlying_price,
+            "selected_expiration": expiration,
+            "dte": dte,
+            "setup_direction": direction,
+            "contracts": compact_contracts,
+            "liquidity_summary": {
+                "best_available_side": best_available_side,
+                "overall_quality": overall_quality,
+                "warnings": warnings,
+            },
+            "warnings": warnings,
+            "read_only": True,
+        }
+    except Exception as error:
+        return unavailable_option_chain_context(snapshot, f"Alpaca options data unavailable: {error}")
+
+
 def build_ai_chart_snapshot(requested_timeframe="5Min"):
     requested_timeframe = requested_timeframe if requested_timeframe in {*TIMEFRAMES, "Daily"} else "5Min"
     now = datetime.now(ET)
@@ -4563,6 +4852,7 @@ def build_ai_chart_snapshot(requested_timeframe="5Min"):
         "cache_status": "miss",
         "read_only": True,
     }
+    snapshot["option_chain_context"] = build_ai_option_chain_context(snapshot)
     snapshot["ai_event"] = detect_ai_review_event(snapshot)
 
     with _ai_snapshot_lock:
@@ -4893,8 +5183,18 @@ def build_fallback_direct_answer(user_message, chart_summary, market_session_sta
     )
 
 
-def build_current_setup_application(decision, summary, setup, risk_reward, market_context, gates, volume_context=None):
+def build_current_setup_application(
+    decision,
+    summary,
+    setup,
+    risk_reward,
+    market_context,
+    gates,
+    volume_context=None,
+    option_chain_context=None,
+):
     volume_context = volume_context or {}
+    option_chain_context = option_chain_context or {}
     grade = setup.get("professional_grade") or "unrated"
     stage = setup.get("confirmation_stage") or setup.get("status") or "no setup"
     rr_grade = risk_reward.get("rr_grade") or "unavailable"
@@ -4905,11 +5205,17 @@ def build_current_setup_application(decision, summary, setup, risk_reward, marke
         f"Volume strength is {volume_context.get('volume_strength') or 'unknown'} "
         f"with RVOL20 {volume_context.get('rvol_20') if volume_context.get('rvol_20') is not None else 'unknown'}."
     )
+    option_summary = (
+        f"Option contract quality is "
+        f"{(option_chain_context.get('liquidity_summary') or {}).get('overall_quality') or 'UNKNOWN'}."
+        if option_chain_context.get("available")
+        else "Option contract quality is unavailable; this review remains chart-only."
+    )
     return (
         f"Current chart decision: {decision}. Entry marker is {marker_status}. "
         f"Setup quality is {grade} with stage {stage}; risk/reward is {rr_grade}; "
         f"market regime is {regime}; SPY/QQQ market confirmation is {market_confirmation}. "
-        f"{volume_summary} {summary}"
+        f"{volume_summary} {option_summary} {summary}"
     )
 
 
@@ -4936,6 +5242,10 @@ def build_fallback_ai_review(snapshot, user_message=None):
     direction = setup.get("direction") if setup.get("direction") in {"bullish", "bearish"} else "neutral"
     volume_context = select_review_volume_context(snapshot, setup)
     market_session_status = snapshot.get("market_session_status") or build_market_session_status()
+    option_chain_context = snapshot.get("option_chain_context") or unavailable_option_chain_context(
+        snapshot,
+        "Option chain context is unavailable.",
+    )
 
     warnings = list(gates.get("warnings") or [])
     warnings.extend(risk_reward.get("rr_warnings") or [])
@@ -4944,6 +5254,11 @@ def build_fallback_ai_review(snapshot, user_message=None):
         warnings.append("Low RVOL: setup may lack participation; short-dated options are more vulnerable if price stalls.")
     elif volume_context.get("volume_strength") == "weak":
         warnings.append("Weak RVOL: setup participation is below recent activity.")
+    if option_chain_context.get("available"):
+        warnings.extend(option_chain_context.get("warnings") or [])
+        option_quality = (option_chain_context.get("liquidity_summary") or {}).get("overall_quality")
+        if option_quality in {"WEAK", "BAD"}:
+            warnings.append(f"Chart setup quality and option contract quality differ: selected contract quality is {option_quality}.")
     warnings = list(dict.fromkeys(warnings))
 
     if not best_setup:
@@ -4990,6 +5305,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
         market_context,
         gates,
         volume_context,
+        option_chain_context,
     )
 
     entry_conditions = []
@@ -5034,6 +5350,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
         "extension": gates.get("extension"),
         "volume_context": volume_context,
         "market_session_status": market_session_status,
+        "option_chain_context": option_chain_context,
         "user_message": user_message,
         "read_only": True,
     }
@@ -5067,6 +5384,11 @@ def build_fallback_ai_review(snapshot, user_message=None):
                 ["Volume spike confirms participation alongside the setup direction."]
                 if volume_context.get("volume_spike") and volume_context.get("breakout_volume_confirmed")
                 else []
+            ),
+            *(
+                option_chain_context.get("warnings") or []
+                if option_chain_context.get("available")
+                else ["Alpaca option contract data is unavailable; review is based on chart context only."]
             ),
         ])),
         "exit_plan": {
@@ -5213,6 +5535,9 @@ def call_openai_trade_review(snapshot, user_message=None):
         "Use each intraday timeframe's volume_context as confirmation and risk context only. Mention strong or weak "
         "volume when relevant, but never treat volume as a standalone trade signal or let it override marker gates. "
         "For short-dated and 0DTE options, low RVOL increases stall and chop risk. "
+        "Use option_chain_context to separate chart setup quality from option contract quality. Warn about wide "
+        "spreads, weak liquidity, low volume/open interest, fast theta decay, and high implied volatility when "
+        "present. Option data is risk context only: it cannot create marker eligibility or override backend gates. "
         "If the user asks whether the market is open, answer using market_session_status only and never guess from "
         "general knowledge. If it says CLOSED, say the market is closed. If it is a weekend, clearly say the regular "
         "U.S. stock market session is closed because it is the weekend. When holiday_calendar_enabled is false on a "

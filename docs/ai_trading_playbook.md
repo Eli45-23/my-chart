@@ -172,6 +172,21 @@ Volume helps confirm whether meaningful participation supports current price act
 - Volume is confirmation and risk context, never a standalone entry signal.
 - Volume must never create an entry marker or override deterministic backend gates.
 
+## Option Chain and Contract Quality
+
+A good chart setup and a good option contract are separate requirements. AAPL can move in the expected direction while a selected option still performs poorly because of spread, theta decay, implied volatility, liquidity, or late timing.
+
+- Bid/ask spread matters because wide spreads increase slippage and bad-fill risk.
+- Delta affects how responsive the contract may be to AAPL price movement.
+- Theta matters heavily for 0DTE and short-dated contracts because value can decay quickly.
+- Implied volatility affects premium and creates IV-compression risk.
+- Option volume and open interest help describe contract liquidity.
+- Prefer liquid contracts with reasonable spreads when options data is available.
+- The AI must clearly warn when chart setup quality is good but selected contract quality is weak.
+- Missing or unavailable option data means the review remains chart-only.
+- Option-chain data is confirmation and risk context, never a standalone entry signal.
+- Option-chain data cannot create marker eligibility or override deterministic backend chart gates.
+
 ## 4. Price Action and Trend Principles
 
 ### Trend Continuation

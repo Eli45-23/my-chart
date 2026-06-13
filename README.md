@@ -63,6 +63,8 @@ The compact AI snapshot also includes read-only Volume/RVOL confirmation context
 
 AI market-open answers use a deterministic America/New_York session-status object from the backend. Weekend and supported session-hour status are calculated directly; exchange holidays are not yet implemented and should be verified manually.
 
+When available, AI Trade Review also uses a compact Alpaca `option_chain_context` containing only selected near-ATM call/put contract-quality data. It can warn about spreads, liquidity, theta, implied volatility, and contract quality. If Alpaca options data is unavailable or stale, the AI safely falls back to chart-only review. No option order or purchase is placed or automated.
+
 AI Trade Review:
 
 - does not place trades
