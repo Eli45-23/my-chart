@@ -110,7 +110,9 @@ POSSIBLE ENTRY — NOT AN ORDER
 
 ### Trading Playbook
 
-`docs/ai_trading_playbook.md` defines the AI assistant's professional trading doctrine, options-risk knowledge, setup standards, marker rules, decision language, and safety boundaries. Backend chart logic and hard gates remain the source of truth.
+`docs/ai_trading_playbook.md` defines the AI assistant's professional trading doctrine, options-risk knowledge, setup standards, marker rules, decision language, and safety boundaries. Its educational principles are grounded in summarized material from the OCC Options Disclosure Document, FINRA options investor education, Cboe Options Institute, and SEC Investor.gov. It does not copy or replace those source documents.
+
+The playbook guides interpretation only. Backend chart logic, structured snapshot data, and hard gates remain the source of truth.
 
 Every review follows this safety doctrine:
 
