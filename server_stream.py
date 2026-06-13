@@ -2348,6 +2348,272 @@ def grade_confirmation_setups_with_context(confirmation_setups, professional_con
     return confirmation_setups
 
 
+def build_risk_reward_targets(direction, entry, levels=None, support_resistance=None, supply_demand=None, level_clusters=None):
+    levels = levels or {}
+    support_resistance = support_resistance or {"support": [], "resistance": []}
+    supply_demand = supply_demand or {"demand": [], "supply": []}
+    level_clusters = level_clusters or {"clusters": []}
+
+    candidates = []
+
+    def add(price, label, kind):
+        if price is None:
+            return
+
+        price = round_price(price)
+        if price is None:
+            return
+
+        if direction == "bullish" and price <= entry:
+            return
+        if direction == "bearish" and price >= entry:
+            return
+
+        candidates.append({
+            "price": price,
+            "label": label,
+            "kind": kind,
+        })
+
+    if direction == "bullish":
+        add(levels.get("pmh"), "PMH", "premarket_high")
+        add(levels.get("pdh"), "PDH", "previous_day_high")
+        add(levels.get("pdc"), "PDC", "previous_day_close")
+
+        for idx, level in enumerate(support_resistance.get("resistance", []) or []):
+            add(level.get("price"), f"R{idx + 1}", "resistance")
+
+        for idx, zone in enumerate(supply_demand.get("supply", []) or []):
+            add(zone.get("low"), f"Supply {idx + 1}", "supply")
+
+        for idx, cluster in enumerate(level_clusters.get("clusters", []) or []):
+            if cluster.get("kind") == "upside":
+                add(cluster.get("low"), cluster.get("label") or f"Upside Cluster {idx + 1}", "level_cluster")
+    elif direction == "bearish":
+        add(levels.get("pml"), "PML", "premarket_low")
+        add(levels.get("pdl"), "PDL", "previous_day_low")
+        add(levels.get("pdc"), "PDC", "previous_day_close")
+
+        for idx, level in enumerate(support_resistance.get("support", []) or []):
+            add(level.get("price"), f"S{idx + 1}", "support")
+
+        for idx, zone in enumerate(supply_demand.get("demand", []) or []):
+            add(zone.get("high"), f"Demand {idx + 1}", "demand")
+
+        for idx, cluster in enumerate(level_clusters.get("clusters", []) or []):
+            if cluster.get("kind") == "downside":
+                add(cluster.get("high"), cluster.get("label") or f"Downside Cluster {idx + 1}", "level_cluster")
+
+    unique = {}
+    for candidate in candidates:
+        key = candidate["price"]
+        if key not in unique:
+            unique[key] = candidate
+
+    return sorted(
+        unique.values(),
+        key=lambda candidate: candidate["price"],
+        reverse=direction == "bearish",
+    )
+
+
+def calculate_setup_risk_reward(
+    setup,
+    levels=None,
+    support_resistance=None,
+    supply_demand=None,
+    level_clusters=None,
+    professional_context=None,
+):
+    """
+    Builds read-only chart guidance for an existing confirmation setup.
+    It does not place, size, or manage orders.
+    """
+    direction = setup.get("direction")
+    level_price = setup.get("level_price")
+    trigger = setup.get("trigger")
+    existing_invalidation = setup.get("invalidation")
+    professional_context = professional_context or {}
+    atr14 = professional_context.get("aapl", {}).get("atr14")
+
+    entry = trigger if trigger is not None else level_price
+    if entry is None or direction not in {"bullish", "bearish"}:
+        return {
+            "suggested_entry": round_price(entry),
+            "invalidation": round_price(existing_invalidation),
+            "stop_distance": None,
+            "target_1": None,
+            "target_2": None,
+            "target_3": None,
+            "reward_1": None,
+            "reward_2": None,
+            "reward_3": None,
+            "rr_1": None,
+            "rr_2": None,
+            "rr_3": None,
+            "nearest_opposing_level": None,
+            "room_to_opposing_level": None,
+            "rr_grade": "BAD",
+            "rr_warnings": ["no clean target found"],
+            "read_only": True,
+        }
+
+    entry = round_price(entry)
+    buffer = max(0.03, (atr14 or 0) * 0.10)
+
+    if direction == "bullish":
+        structural_low = setup.get("level_low")
+        structural_invalidation = structural_low - buffer if structural_low is not None else None
+        invalidation_candidates = [value for value in [existing_invalidation, structural_invalidation] if value is not None]
+        invalidation = min(invalidation_candidates) if invalidation_candidates else entry - max(buffer, (atr14 or 0.10) * 0.50)
+        stop_distance = entry - invalidation
+    else:
+        structural_high = setup.get("level_high")
+        structural_invalidation = structural_high + buffer if structural_high is not None else None
+        invalidation_candidates = [value for value in [existing_invalidation, structural_invalidation] if value is not None]
+        invalidation = max(invalidation_candidates) if invalidation_candidates else entry + max(buffer, (atr14 or 0.10) * 0.50)
+        stop_distance = invalidation - entry
+
+    invalidation = round_price(invalidation)
+    stop_distance = round_price(stop_distance)
+
+    opposing_levels = build_risk_reward_targets(
+        direction,
+        entry,
+        levels=levels,
+        support_resistance=support_resistance,
+        supply_demand=supply_demand,
+        level_clusters=level_clusters,
+    )
+    nearest_opposing = opposing_levels[0] if opposing_levels else None
+    room_to_opposing = (
+        abs(nearest_opposing["price"] - entry)
+        if nearest_opposing is not None
+        else None
+    )
+
+    targets = list(opposing_levels[:3])
+    if stop_distance is not None and stop_distance > 0:
+        for multiple in [1, 2, 3]:
+            if len(targets) >= 3:
+                break
+            price = entry + stop_distance * multiple if direction == "bullish" else entry - stop_distance * multiple
+            price = round_price(price)
+            if not any(abs(target["price"] - price) < 0.01 for target in targets):
+                targets.append({
+                    "price": price,
+                    "label": f"{multiple}R fallback",
+                    "kind": "risk_fallback",
+                })
+
+        targets = sorted(
+            targets,
+            key=lambda target: target["price"],
+            reverse=direction == "bearish",
+        )[:3]
+
+    target_values = [target["price"] for target in targets]
+    rewards = [
+        round_price(abs(target - entry))
+        for target in target_values
+    ]
+    rr_values = [
+        round(reward / stop_distance, 2) if stop_distance and stop_distance > 0 else None
+        for reward in rewards
+    ]
+
+    while len(target_values) < 3:
+        target_values.append(None)
+        rewards.append(None)
+        rr_values.append(None)
+
+    warnings = []
+    min_reasonable_stop = max(0.03, (atr14 or 0) * 0.15)
+    max_reasonable_stop = max(0.75, (atr14 or 0) * 2.50)
+
+    if stop_distance is None or stop_distance <= min_reasonable_stop:
+        warnings.append("stop distance too small")
+    if stop_distance is not None and stop_distance > max_reasonable_stop:
+        warnings.append("stop distance too wide")
+    if rr_values[0] is not None and rr_values[0] < 1.0:
+        warnings.append("target too close")
+        warnings.append("risk/reward below 1.0")
+    if room_to_opposing is not None and stop_distance and room_to_opposing < stop_distance:
+        warnings.append("opposing level too close")
+    if not opposing_levels:
+        warnings.append("no clean target found")
+    if setup.get("professional_grade") == "NO_TRADE":
+        warnings.append("setup is NO_TRADE")
+    if setup.get("status") != "CONFIRMED":
+        warnings.append("setup is not CONFIRMED yet")
+    if professional_context.get("aapl", {}).get("regime", {}).get("regime") == "CHOP":
+        warnings.append("market is CHOP")
+
+    rr_1 = rr_values[0]
+    rr_2 = rr_values[1]
+    stop_too_small = "stop distance too small" in warnings
+    stop_too_wide = "stop distance too wide" in warnings
+    target_unavailable = target_values[0] is None
+    opposing_too_close = "opposing level too close" in warnings
+
+    if stop_too_wide or target_unavailable or rr_1 is None or rr_1 < 1.0:
+        rr_grade = "BAD"
+    elif stop_too_small or opposing_too_close or rr_2 is None:
+        rr_grade = "WEAK"
+    elif rr_2 >= 2.0:
+        rr_grade = "GOOD"
+    elif rr_1 >= 1.0 and rr_2 >= 1.5:
+        rr_grade = "OK"
+    else:
+        rr_grade = "WEAK"
+
+    return {
+        "suggested_entry": entry,
+        "invalidation": invalidation,
+        "stop_distance": stop_distance,
+        "target_1": target_values[0],
+        "target_2": target_values[1],
+        "target_3": target_values[2],
+        "reward_1": rewards[0],
+        "reward_2": rewards[1],
+        "reward_3": rewards[2],
+        "rr_1": rr_values[0],
+        "rr_2": rr_values[1],
+        "rr_3": rr_values[2],
+        "nearest_opposing_level": nearest_opposing,
+        "room_to_opposing_level": round_price(room_to_opposing),
+        "rr_grade": rr_grade,
+        "rr_warnings": list(dict.fromkeys(warnings)),
+        "read_only": True,
+    }
+
+
+def enrich_confirmation_setups_with_risk_reward(
+    confirmation_setups,
+    levels=None,
+    support_resistance=None,
+    supply_demand=None,
+    level_clusters=None,
+    professional_context=None,
+):
+    if not confirmation_setups:
+        return confirmation_setups
+
+    for setup in confirmation_setups.get("setups", []):
+        setup["risk_reward"] = calculate_setup_risk_reward(
+            setup,
+            levels=levels,
+            support_resistance=support_resistance,
+            supply_demand=supply_demand,
+            level_clusters=level_clusters,
+            professional_context=professional_context,
+        )
+
+    confirmation_setups["risk_reward_enabled"] = True
+    confirmation_setups["read_only"] = True
+    return confirmation_setups
+
+
 
 def latest_indicator_value(series):
     if not series:
@@ -2848,6 +3114,15 @@ def chart_data():
         confirmation_setups = grade_confirmation_setups_with_context(
             confirmation_setups,
             professional_context,
+        )
+
+        confirmation_setups = enrich_confirmation_setups_with_risk_reward(
+            confirmation_setups,
+            levels=levels,
+            support_resistance=support_resistance,
+            supply_demand=supply_demand,
+            level_clusters=level_clusters,
+            professional_context=professional_context,
         )
 
         logged_setups = log_confirmation_setups(

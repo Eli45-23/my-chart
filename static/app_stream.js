@@ -269,6 +269,37 @@ function textPill(text) {
   return `<span class="pill">${text}</span>`;
 }
 
+function formatPrice(value) {
+  return value === null || value === undefined ? "n/a" : Number(value).toFixed(2);
+}
+
+function formatRiskReward(setup, detailed = false) {
+  const rr = setup?.risk_reward;
+  if (!rr) return "RR: n/a";
+
+  const summary = [
+    `RR: ${rr.rr_grade || "n/a"}`,
+    `R1 ${rr.rr_1 ?? "n/a"}`,
+    `R2 ${rr.rr_2 ?? "n/a"}`,
+    `Entry ${formatPrice(rr.suggested_entry)}`,
+    `Stop ${formatPrice(rr.invalidation)}`,
+    `T1 ${formatPrice(rr.target_1)}`,
+    `T2 ${formatPrice(rr.target_2)}`,
+  ];
+
+  if (detailed) {
+    summary.push(
+      `R3 ${rr.rr_3 ?? "n/a"}`,
+      `T3 ${formatPrice(rr.target_3)}`,
+      `Opposing ${rr.nearest_opposing_level?.label || "n/a"} ${formatPrice(rr.nearest_opposing_level?.price)}`,
+      `Room ${formatPrice(rr.room_to_opposing_level)}`,
+      `RR Warnings ${(rr.rr_warnings || []).join(", ") || "none"}`
+    );
+  }
+
+  return summary.join(" | ");
+}
+
 function secondsLeftInCandle() {
   const now = new Date();
   const nowEtString = now.toLocaleString("en-US", { timeZone: "America/New_York" });
@@ -344,7 +375,7 @@ function updateLegend(data) {
     textPill(`Trend Filter: ${latestPayload.confirmation_setups?.trend?.label || "n/a"} | Price ${latestPayload.confirmation_setups?.trend?.price?.toFixed?.(2) || "n/a"} | VWAP ${latestPayload.confirmation_setups?.trend?.vwap?.toFixed?.(2) || "n/a"} | EMA9 ${latestPayload.confirmation_setups?.trend?.ema9?.toFixed?.(2) || "n/a"} | EMA20 ${latestPayload.confirmation_setups?.trend?.ema20?.toFixed?.(2) || "n/a"}`),
     textPill(`Setup Status: ${latestPayload.confirmation_setups?.status || "NO_SETUP"}`),
     textPill(`Best Setup: ${latestPayload.confirmation_setups?.best_grade || bestSetup?.professional_grade || "NO_TRADE"} / ${bestSetup?.professional_score ?? bestSetup?.score ?? 0}`),
-    textPill(`Setups: ${setups.map(s => `${s.professional_grade || ""} ${s.status} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.professional_score ?? s.score ?? 0} vol ${s.volume_ratio || "n/a"}x`).join(" | ") || "none"}`),
+    textPill(`Setups: ${setups.map(s => `${s.professional_grade || ""} ${s.status} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.professional_score ?? s.score ?? 0} vol ${s.volume_ratio || "n/a"}x | ${formatRiskReward(s, !cleanMode)}`).join(" || ") || "none"}`),
     textPill("Read-only labels: A+ / A / B / C / NO_TRADE and WATCH / CONFIRMED / INVALIDATED"),
     textPill(levels.premarket_window || "Premarket: 04:00-09:30 ET"),
   ].join("");
@@ -373,7 +404,7 @@ function addConfirmationSetup(label, setup) {
   }
 
   addLevel(
-    `${setup.status} ${String(setup.direction || "").toUpperCase()} ${setup.source || label}`,
+    `${setup.status} ${String(setup.direction || "").toUpperCase()} ${setup.source || label} RR ${setup.risk_reward?.rr_grade || "n/a"} R1 ${setup.risk_reward?.rr_1 ?? "n/a"} R2 ${setup.risk_reward?.rr_2 ?? "n/a"}`,
     price,
     color,
     style,
