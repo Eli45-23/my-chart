@@ -2609,6 +2609,8 @@ def strict_trade_quality_grade(setup, professional_context):
     """
     direction = setup.get("direction")
     status = setup.get("status")
+    confirmation_stage = setup.get("confirmation_stage", status)
+    confirmation_score = setup.get("confirmation_score")
     setup_score = setup.get("score") or 0
 
     aapl_context = professional_context.get("aapl", {}) if professional_context else {}
@@ -2646,6 +2648,10 @@ def strict_trade_quality_grade(setup, professional_context):
     warnings = []
 
     # Hard NO_TRADE conditions.
+    if confirmation_stage == "FAILED":
+        warnings.append("Confirmation stage failed.")
+    elif confirmation_stage != "CONFIRMED":
+        warnings.append(f"Confirmation stage is {confirmation_stage}.")
     if status == "INVALIDATED":
         warnings.append("Setup already invalidated.")
     if no_trade_context:
@@ -2686,7 +2692,8 @@ def strict_trade_quality_grade(setup, professional_context):
         warnings.append("AAPL relative strength conflicts with bearish setup.")
 
     hard_no_trade = (
-        status == "INVALIDATED"
+        confirmation_stage == "FAILED"
+        or status == "INVALIDATED"
         or no_trade_context
         or regime == "CHOP"
         or (chop_score is not None and chop_score >= 70)
@@ -2714,6 +2721,12 @@ def strict_trade_quality_grade(setup, professional_context):
         score += 14
     if volume_confirmed:
         score += 12
+    if confirmation_stage == "CONFIRMED":
+        score += 8
+    elif confirmation_stage == "EARLY_CONFIRM":
+        score += 2
+    elif confirmation_stage == "WATCH":
+        score -= 8
 
     # Market/risk environment score.
     if regime == "TREND":
@@ -2808,6 +2821,9 @@ def strict_trade_quality_grade(setup, professional_context):
     else:
         grade = "NO_TRADE"
 
+    if confirmation_stage != "CONFIRMED" and grade in {"A", "A+"}:
+        grade = "B"
+
     return {
         "grade": grade,
         "score": score,
@@ -2815,6 +2831,8 @@ def strict_trade_quality_grade(setup, professional_context):
         "checks": {
             "direction": direction,
             "status": status,
+            "confirmation_stage": confirmation_stage,
+            "confirmation_score": confirmation_score,
             "regime": regime,
             "chop_score": chop_score,
             "regime_score": regime_score,
@@ -3111,7 +3129,7 @@ def calculate_setup_risk_reward(
             warnings.append("Target level is weak.")
     if setup.get("professional_grade") == "NO_TRADE":
         warnings.append("setup is NO_TRADE")
-    if setup.get("status") != "CONFIRMED":
+    if setup.get("confirmation_stage", setup.get("status")) != "CONFIRMED":
         warnings.append("setup is not CONFIRMED yet")
     if professional_context.get("aapl", {}).get("regime", {}).get("regime") == "CHOP":
         warnings.append("market is CHOP")
@@ -3192,6 +3210,107 @@ def enrich_confirmation_setups_with_risk_reward(
         )
 
     confirmation_setups["risk_reward_enabled"] = True
+    confirmation_setups["read_only"] = True
+    return confirmation_setups
+
+
+def finalize_confirmation_setup_stages(confirmation_setups, professional_context=None):
+    """Finalize read-only v2 stages after market context and risk/reward exist."""
+    if not confirmation_setups:
+        return confirmation_setups
+
+    professional_context = professional_context or {}
+    regime = professional_context.get("aapl", {}).get("regime", {}).get("regime")
+    action_label = professional_context.get("aapl", {}).get("regime", {}).get("action_label")
+    status_map = {
+        "WATCH": "WATCH",
+        "EARLY_CONFIRM": "WATCH",
+        "CONFIRMED": "CONFIRMED",
+        "FAILED": "INVALIDATED",
+    }
+
+    for setup in confirmation_setups.get("setups", []):
+        reclaim_confirmed = bool(setup.get("reclaim_confirmed"))
+        candle_closed_confirmed = bool(setup.get("candle_closed_confirmed"))
+        next_candle_confirmed = bool(setup.get("next_candle_confirmed"))
+        structure_confirmed = bool(setup.get("structure_confirmed"))
+        volume_confirmed = bool(setup.get("volume_confirmed"))
+        trend_confirmed = bool(setup.get("trend_confirmed"))
+        rr_grade = setup.get("risk_reward", {}).get("rr_grade")
+        failed = setup.get("status") == "INVALIDATED" or setup.get("confirmation_stage") == "FAILED"
+        context_allowed = regime != "CHOP" and action_label != "NO_NEW_TRADES"
+        rr_allowed = rr_grade != "BAD"
+
+        if failed:
+            stage = "FAILED"
+        elif (
+            reclaim_confirmed
+            and candle_closed_confirmed
+            and next_candle_confirmed
+            and structure_confirmed
+            and volume_confirmed
+            and trend_confirmed
+            and context_allowed
+            and rr_allowed
+        ):
+            stage = "CONFIRMED"
+        elif reclaim_confirmed:
+            stage = "EARLY_CONFIRM"
+        else:
+            stage = "WATCH"
+
+        reasons = []
+        warnings = []
+        score = 0
+        checks = [
+            (reclaim_confirmed, 25, "Level reclaim/rejection detected.", "Waiting for reclaim/rejection."),
+            (candle_closed_confirmed, 15, "Confirmation candle closed.", "Confirmation candle may still be forming."),
+            (next_candle_confirmed, 15, "Next candle held the level.", "Waiting for next-candle confirmation."),
+            (structure_confirmed, 15, "Price structure confirmed.", "Structure not confirmed."),
+            (volume_confirmed, 10, "Volume confirmed.", "Volume not confirmed."),
+            (trend_confirmed, 10, "Trend filter confirmed.", "Trend filter not confirmed."),
+            (context_allowed, 5, "Market regime allows confirmation.", "Market regime blocks final confirmation."),
+            (rr_allowed, 5, "Risk/reward allows confirmation.", "Risk/reward is BAD."),
+        ]
+        for passed, points, reason, warning in checks:
+            if passed:
+                score += points
+                reasons.append(reason)
+            else:
+                warnings.append(warning)
+
+        if failed:
+            score = 0
+            warnings.append("Setup failed its invalidation.")
+
+        setup["confirmation_stage"] = stage
+        setup["confirmation_score"] = max(0, min(100, int(score)))
+        setup["confirmation_reasons"] = list(dict.fromkeys(reasons))
+        setup["confirmation_warnings"] = list(dict.fromkeys(warnings))
+        setup["status"] = status_map[stage]
+        setup["read_only"] = True
+
+        risk_reward = setup.setdefault("risk_reward", {"read_only": True})
+        rr_warnings = risk_reward.setdefault("rr_warnings", [])
+        not_confirmed_warning = "setup is not CONFIRMED yet"
+        if stage == "CONFIRMED":
+            risk_reward["rr_warnings"] = [
+                warning for warning in rr_warnings if warning != not_confirmed_warning
+            ]
+        elif not_confirmed_warning not in rr_warnings:
+            rr_warnings.append(not_confirmed_warning)
+
+    setups = confirmation_setups.get("setups", [])
+    if any(setup.get("confirmation_stage") == "CONFIRMED" for setup in setups):
+        confirmation_setups["status"] = "CONFIRMED"
+    elif any(setup.get("confirmation_stage") in {"WATCH", "EARLY_CONFIRM"} for setup in setups):
+        confirmation_setups["status"] = "WATCH"
+    elif any(setup.get("confirmation_stage") == "FAILED" for setup in setups):
+        confirmation_setups["status"] = "INVALIDATED"
+    else:
+        confirmation_setups["status"] = "NO_SETUP"
+
+    confirmation_setups["confirmation_stages_v2"] = True
     confirmation_setups["read_only"] = True
     return confirmation_setups
 
@@ -3383,12 +3502,20 @@ def detect_confirmation_setups(candles, current_price=None, levels=None, support
 
             if direction == "bullish":
                 structure_confirmed = higher_low or breaks_trigger_high
+                next_candle_confirmed = next_candle is not None and (
+                    next_candle["close"] > price
+                    and (next_candle["low"] >= price - tolerance or next_candle["low"] > candle["low"])
+                )
                 trend_confirmed = trend["bullish"]
                 invalidated = candle["close"] < price - tolerance
                 trigger = round_price(candle["high"])
                 invalidation = round_price(price - tolerance)
             else:
                 structure_confirmed = lower_high or breaks_trigger_low
+                next_candle_confirmed = next_candle is not None and (
+                    next_candle["close"] < price
+                    and (next_candle["high"] <= price + tolerance or next_candle["high"] < candle["high"])
+                )
                 trend_confirmed = trend["bearish"]
                 invalidated = candle["close"] > price + tolerance
                 trigger = round_price(candle["low"])
@@ -3407,15 +3534,31 @@ def detect_confirmation_setups(candles, current_price=None, levels=None, support
                 score += 5
             score = min(100, score)
 
+            candle_closed_confirmed = next_candle is not None
             if invalidated:
-                status = "INVALIDATED"
-            elif reclaim_confirmed and volume_confirmed and structure_confirmed and trend_confirmed:
-                status = "CONFIRMED"
+                confirmation_stage = "FAILED"
+            elif reclaim_confirmed and candle_closed_confirmed and next_candle_confirmed and volume_confirmed and structure_confirmed and trend_confirmed:
+                confirmation_stage = "CONFIRMED"
+            elif reclaim_confirmed:
+                confirmation_stage = "EARLY_CONFIRM"
             else:
-                status = "WATCH"
+                confirmation_stage = "WATCH"
+
+            status = {
+                "WATCH": "WATCH",
+                "EARLY_CONFIRM": "WATCH",
+                "CONFIRMED": "CONFIRMED",
+                "FAILED": "INVALIDATED",
+            }[confirmation_stage]
 
             setups.append({
                 "status": status,
+                "confirmation_stage": confirmation_stage,
+                "confirmation_score": score,
+                "confirmation_reasons": [],
+                "confirmation_warnings": [],
+                "candle_closed_confirmed": bool(candle_closed_confirmed),
+                "next_candle_confirmed": bool(next_candle_confirmed),
                 "direction": direction,
                 "source": level.get("name"),
                 "kind": level.get("kind"),
@@ -3471,7 +3614,7 @@ def detect_confirmation_setups(candles, current_price=None, levels=None, support
             "volume_rule": "Current candle volume greater than previous 20-candle average.",
             "trend_rule": "Price vs VWAP and EMA9 vs EMA20.",
             "confirmation_rule": "Reclaim/rejection + volume + structure + trend.",
-            "labels": ["WATCH", "CONFIRMED", "INVALIDATED"],
+            "labels": ["WATCH", "EARLY_CONFIRM", "CONFIRMED", "FAILED"],
         },
     }
 
@@ -3793,6 +3936,16 @@ def chart_data():
             supply_demand=supply_demand,
             level_clusters=level_clusters,
             professional_context=professional_context,
+        )
+
+        confirmation_setups = finalize_confirmation_setup_stages(
+            confirmation_setups,
+            professional_context,
+        )
+
+        confirmation_setups = grade_confirmation_setups_with_context(
+            confirmation_setups,
+            professional_context,
         )
 
         logged_setups = log_confirmation_setups(

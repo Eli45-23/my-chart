@@ -397,10 +397,10 @@ function updateLegend(data) {
     textPill(`Warnings: ${(latestPayload.professional_context?.warnings || []).join(" | ") || "none"}`),
     textPill(`Logger: setups +${latestPayload.setup_logging?.logged_setups ?? 0} | outcomes +${latestPayload.setup_logging?.outcomes_evaluated ?? 0}`),
     textPill(`Trend Filter: ${latestPayload.confirmation_setups?.trend?.label || "n/a"} | Price ${latestPayload.confirmation_setups?.trend?.price?.toFixed?.(2) || "n/a"} | VWAP ${latestPayload.confirmation_setups?.trend?.vwap?.toFixed?.(2) || "n/a"} | EMA9 ${latestPayload.confirmation_setups?.trend?.ema9?.toFixed?.(2) || "n/a"} | EMA20 ${latestPayload.confirmation_setups?.trend?.ema20?.toFixed?.(2) || "n/a"}`),
-    textPill(`Setup Status: ${latestPayload.confirmation_setups?.status || "NO_SETUP"}`),
+    textPill(`Setup Status: ${latestPayload.confirmation_setups?.status || "NO_SETUP"} | Stages: ${[...new Set(setups.map(s => s.confirmation_stage === "EARLY_CONFIRM" ? "EARLY" : (s.confirmation_stage || s.status)))].join(", ") || "none"}`),
     textPill(`Best Setup: ${latestPayload.confirmation_setups?.best_grade || bestSetup?.professional_grade || "NO_TRADE"} / ${bestSetup?.professional_score ?? bestSetup?.score ?? 0}`),
-    textPill(`Setups: ${setups.map(s => `${s.professional_grade || ""} ${s.status} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.professional_score ?? s.score ?? 0} vol ${s.volume_ratio || "n/a"}x | ${formatRiskReward(s, !cleanMode)}`).join(" || ") || "none"}`),
-    textPill("Read-only labels: A+ / A / B / C / NO_TRADE and WATCH / CONFIRMED / INVALIDATED"),
+    textPill(`Setups: ${setups.map(s => `${s.professional_grade || ""} ${s.confirmation_stage === "EARLY_CONFIRM" ? "EARLY" : (s.confirmation_stage || s.status)} ${s.confirmation_score ?? 0} ${String(s.direction || "").toUpperCase()} ${s.source || ""} @ ${Number(s.level_price).toFixed(2)} score ${s.professional_score ?? s.score ?? 0} vol ${s.volume_ratio || "n/a"}x | ${formatRiskReward(s, !cleanMode)}`).join(" || ") || "none"}`),
+    textPill("Read-only labels: A+ / A / B / C / NO_TRADE and WATCH / EARLY / CONFIRMED / FAILED"),
     textPill(levels.premarket_window || "Premarket: 04:00-09:30 ET"),
   ].join("");
 
@@ -416,19 +416,21 @@ function addConfirmationSetup(label, setup) {
 
   let color = COLORS.confirmationWatch;
   let style = LightweightCharts.LineStyle.Dashed;
+  const stage = setup.confirmation_stage || setup.status || "WATCH";
+  const stageLabel = stage === "EARLY_CONFIRM" ? "EARLY" : stage;
 
-  if (setup.status === "CONFIRMED") {
+  if (stage === "CONFIRMED") {
     color = COLORS.confirmationConfirmed;
     style = LightweightCharts.LineStyle.Solid;
   }
 
-  if (setup.status === "INVALIDATED") {
+  if (stage === "FAILED" || setup.status === "INVALIDATED") {
     color = COLORS.confirmationInvalid;
     style = LightweightCharts.LineStyle.Dotted;
   }
 
   addLevel(
-    `${setup.status} ${String(setup.direction || "").toUpperCase()} ${setup.source || label} RR ${setup.risk_reward?.rr_grade || "n/a"} R1 ${setup.risk_reward?.rr_1 ?? "n/a"} R2 ${setup.risk_reward?.rr_2 ?? "n/a"}`,
+    `${stageLabel} ${String(setup.direction || "").toUpperCase()} ${setup.source || label} RR ${setup.risk_reward?.rr_grade || "n/a"} R1 ${setup.risk_reward?.rr_1 ?? "n/a"} R2 ${setup.risk_reward?.rr_2 ?? "n/a"}`,
     price,
     color,
     style,
