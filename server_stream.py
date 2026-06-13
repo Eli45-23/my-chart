@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import queue
 import threading
@@ -37,6 +38,66 @@ stream_status = {
     "last_message": None,
     "error": None,
 }
+AI_SNAPSHOT_CACHE_SECONDS = 20
+AI_PLAYBOOK_PATH = os.path.join(os.path.dirname(__file__), "docs", "ai_trading_playbook.md")
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+AI_REVIEW_SAFETY_TEXT = "Read-only review. Not financial advice. Not an order. Confirm manually. Do not chase."
+ENABLE_AI_AUTO_REVIEW = os.getenv("ENABLE_AI_AUTO_REVIEW", "false").lower() == "true"
+_ai_snapshot_cache = {}
+_ai_snapshot_lock = threading.Lock()
+_latest_ai_review_lock = threading.Lock()
+_ai_event_lock = threading.Lock()
+_ai_event_state = {
+    "fingerprint": None,
+    "ai_review_recommended": False,
+    "latest_event_reason": None,
+    "latest_event_time": None,
+}
+
+
+def empty_ai_review():
+    return {
+        "decision": "WAIT",
+        "bias": "neutral",
+        "confidence": 0,
+        "summary": f"No AI trade review has been requested yet. {AI_REVIEW_SAFETY_TEXT}",
+        "what_ai_sees": "No current review is available.",
+        "professional_reasoning": "Wait for a current structured chart snapshot and review.",
+        "entry_conditions": [],
+        "trap_warnings": [],
+        "options_risk_notes": [],
+        "exit_plan": {
+            "invalidation": None,
+            "target_1": None,
+            "target_2": None,
+            "target_3": None,
+        },
+        "allow_entry_marker": False,
+        "entry_marker": {
+            "price": None,
+            "label": "",
+            "direction": "neutral",
+        },
+        "warnings": ["No current review is available."],
+        "do_not_chase": AI_REVIEW_SAFETY_TEXT,
+        "manual_confirmation_checklist": [
+            "Confirm the setup manually.",
+            "Confirm risk and invalidation before considering any trade.",
+        ],
+        "read_only": True,
+        "not_financial_advice": True,
+        "not_an_order": True,
+        "source": "fallback",
+        "snapshot_summary": {},
+        "ai_review_recommended": False,
+        "latest_event_reason": None,
+        "latest_event_time": None,
+        "ai_auto_review_enabled": ENABLE_AI_AUTO_REVIEW,
+    }
+
+
+LATEST_AI_REVIEW = empty_ai_review()
 
 
 def iso_utc(dt):
@@ -64,7 +125,7 @@ def fetch_bars(symbol, start, end, timeframe="1Min", limit=10000):
     }
     response = requests.get(url, headers=get_headers(), params=params, timeout=20)
     response.raise_for_status()
-    return response.json().get("bars", [])
+    return response.json().get("bars") or []
 
 
 def today_et():
@@ -3943,6 +4004,1056 @@ def build_level_clusters(current_price, levels=None, support_resistance=None, su
     }
 
 
+def candle_direction(candle):
+    if not candle:
+        return "unknown"
+    if candle.get("close") > candle.get("open"):
+        return "bullish"
+    if candle.get("close") < candle.get("open"):
+        return "bearish"
+    return "neutral"
+
+
+def price_relation(price, reference):
+    if price is None or reference is None:
+        return "unknown"
+    if price > reference:
+        return "above"
+    if price < reference:
+        return "below"
+    return "at"
+
+
+def compact_risk_reward(risk_reward):
+    if not risk_reward:
+        return None
+    keys = [
+        "suggested_entry",
+        "invalidation",
+        "stop_distance",
+        "target_1",
+        "target_2",
+        "target_3",
+        "rr_1",
+        "rr_2",
+        "rr_3",
+        "nearest_opposing_level",
+        "room_to_opposing_level",
+        "rr_grade",
+        "rr_warnings",
+        "read_only",
+    ]
+    return {key: risk_reward.get(key) for key in keys}
+
+
+def compact_ai_setup(setup, timeframe=None):
+    if not setup:
+        return None
+    keys = [
+        "direction",
+        "source",
+        "kind",
+        "level_price",
+        "trigger",
+        "invalidation",
+        "professional_grade",
+        "professional_score",
+        "confirmation_stage",
+        "confirmation_score",
+        "status",
+        "volume_ratio",
+        "quality_warnings",
+        "quality_checks",
+        "confirmation_warnings",
+        "confirmation_reasons",
+        "candle_time",
+        "read_only",
+    ]
+    compact = {key: setup.get(key) for key in keys}
+    compact["timeframe"] = timeframe
+    compact["risk_reward"] = compact_risk_reward(setup.get("risk_reward"))
+    return compact
+
+
+def nearest_price_item(items, current_price, price_keys):
+    if current_price is None:
+        return None
+
+    candidates = []
+    for item in items or []:
+        prices = [item.get(key) for key in price_keys if item.get(key) is not None]
+        if not prices:
+            continue
+        nearest_price = min(prices, key=lambda value: abs(value - current_price))
+        candidates.append((abs(nearest_price - current_price), nearest_price, item))
+
+    if not candidates:
+        return None
+
+    distance, nearest_price, item = min(candidates, key=lambda candidate: candidate[0])
+    return {
+        "price": round_price(nearest_price),
+        "distance": round_price(distance),
+        "quality_grade": item.get("quality_grade") or item.get("zone_quality_grade"),
+        "quality_score": item.get("quality_score") or item.get("zone_quality_score"),
+        "read_only": True,
+    }
+
+
+def select_best_setup_from_timeframe(timeframe, confirmation_setups):
+    setups = confirmation_setups.get("setups", []) if confirmation_setups else []
+    if not setups:
+        return None
+
+    grade_rank = {"NO_TRADE": 0, "C": 1, "B": 2, "A": 3, "A+": 4}
+    stage_rank = {"FAILED": 0, "WATCH": 1, "EARLY_CONFIRM": 2, "CONFIRMED": 3}
+    rr_rank = {"BAD": 0, "WEAK": 1, "OK": 2, "GOOD": 3}
+
+    return max(
+        setups,
+        key=lambda setup: (
+            grade_rank.get(setup.get("professional_grade"), 0),
+            stage_rank.get(setup.get("confirmation_stage"), 0),
+            rr_rank.get((setup.get("risk_reward") or {}).get("rr_grade"), 0),
+            setup.get("professional_score") or 0,
+        ),
+    )
+
+
+def select_best_ai_setup(timeframe_contexts):
+    grade_rank = {"NO_TRADE": 0, "C": 1, "B": 2, "A": 3, "A+": 4}
+    stage_rank = {"FAILED": 0, "WATCH": 1, "EARLY_CONFIRM": 2, "CONFIRMED": 3}
+    rr_rank = {"BAD": 0, "WEAK": 1, "OK": 2, "GOOD": 3}
+    timeframe_rank = {"1Min": 1, "15Min": 2, "5Min": 3}
+    candidates = []
+
+    for timeframe in ["1Min", "5Min", "15Min"]:
+        setup = (timeframe_contexts.get(timeframe) or {}).get("best_setup")
+        if setup:
+            candidates.append(setup)
+
+    if not candidates:
+        return None
+
+    return max(
+        candidates,
+        key=lambda setup: (
+            grade_rank.get(setup.get("professional_grade"), 0),
+            stage_rank.get(setup.get("confirmation_stage"), 0),
+            rr_rank.get((setup.get("risk_reward") or {}).get("rr_grade"), 0),
+            timeframe_rank.get(setup.get("timeframe"), 0),
+            setup.get("professional_score") or 0,
+        ),
+    )
+
+
+def compact_intraday_ai_context(payload):
+    timeframe = payload.get("timeframe")
+    candles = payload.get("candles") or []
+    indicators = payload.get("indicators") or {}
+    confirmation_setups = payload.get("confirmation_setups") or {}
+    professional_context = payload.get("professional_context") or {}
+    current_price = payload.get("current_price")
+    latest_close = candles[-1].get("close") if candles else None
+    latest_vwap = latest_indicator_value(indicators.get("vwap"))
+    latest_ema9 = latest_indicator_value(indicators.get("ema9"))
+    latest_ema20 = latest_indicator_value(indicators.get("ema20"))
+    best_setup = select_best_setup_from_timeframe(timeframe, confirmation_setups)
+    most_recent_setup = max(
+        confirmation_setups.get("setups", []),
+        key=lambda setup: setup.get("candle_time") or 0,
+        default=None,
+    )
+    support_resistance = payload.get("support_resistance") or {}
+    supply_demand = payload.get("supply_demand") or {}
+
+    return {
+        "timeframe": timeframe,
+        "data_status": payload.get("data_status"),
+        "latest_close": round_price(latest_close),
+        "latest_candle_time": candles[-1].get("time") if candles else None,
+        "latest_candle_direction": candle_direction(candles[-1] if candles else None),
+        "previous_candle_direction": candle_direction(candles[-2] if len(candles) >= 2 else None),
+        "vwap": round_price(latest_vwap),
+        "ema9": round_price(latest_ema9),
+        "ema20": round_price(latest_ema20),
+        "price_relation_to_vwap": price_relation(current_price, latest_vwap),
+        "price_relation_to_ema9": price_relation(current_price, latest_ema9),
+        "price_relation_to_ema20": price_relation(current_price, latest_ema20),
+        "trend_state": confirmation_setups.get("trend", {}).get("label"),
+        "most_recent_confirmation_setup": compact_ai_setup(most_recent_setup, timeframe),
+        "best_setup": compact_ai_setup(best_setup, timeframe),
+        "professional_grade": best_setup.get("professional_grade") if best_setup else confirmation_setups.get("best_grade"),
+        "professional_score": best_setup.get("professional_score") if best_setup else confirmation_setups.get("best_score"),
+        "confirmation_stage": best_setup.get("confirmation_stage") if best_setup else None,
+        "setup_status": best_setup.get("status") if best_setup else confirmation_setups.get("status"),
+        "risk_reward": compact_risk_reward(best_setup.get("risk_reward")) if best_setup else None,
+        "warnings": list(dict.fromkeys(
+            (confirmation_setups.get("quality_warnings") or [])
+            + (professional_context.get("warnings") or [])
+        ))[:12],
+        "checks": best_setup.get("quality_checks") if best_setup else None,
+        "nearest_support": nearest_price_item(support_resistance.get("support"), current_price, ["price"]),
+        "nearest_resistance": nearest_price_item(support_resistance.get("resistance"), current_price, ["price"]),
+        "nearest_demand_zone": nearest_price_item(supply_demand.get("demand"), current_price, ["low", "high"]),
+        "nearest_supply_zone": nearest_price_item(supply_demand.get("supply"), current_price, ["low", "high"]),
+        "read_only": True,
+    }
+
+
+def unknown_daily_ai_context(error=None):
+    return {
+        "timeframe": "Daily",
+        "data_status": "unknown",
+        "latest_close": None,
+        "latest_candle_direction": "unknown",
+        "previous_candle_direction": "unknown",
+        "vwap": None,
+        "ema9": None,
+        "ema20": None,
+        "price_relation_to_vwap": "not_applicable",
+        "price_relation_to_ema9": "unknown",
+        "price_relation_to_ema20": "unknown",
+        "trend_state": "UNKNOWN",
+        "daily_bias": "unknown",
+        "daily_structure": "unknown",
+        "previous_daily_high": None,
+        "previous_daily_low": None,
+        "previous_daily_close": None,
+        "price_relation_to_previous_daily_high": "unknown",
+        "price_relation_to_previous_daily_low": "unknown",
+        "price_relation_to_previous_daily_close": "unknown",
+        "most_recent_confirmation_setup": None,
+        "best_setup": None,
+        "professional_grade": None,
+        "professional_score": None,
+        "confirmation_stage": None,
+        "setup_status": "NO_SETUP",
+        "risk_reward": None,
+        "warnings": [f"Daily context unavailable: {error}"] if error else ["Daily context unavailable."],
+        "checks": None,
+        "nearest_support": None,
+        "nearest_resistance": None,
+        "nearest_demand_zone": None,
+        "nearest_supply_zone": None,
+        "read_only": True,
+    }
+
+
+def build_daily_ai_context(current_price=None):
+    try:
+        now = datetime.now(ET)
+        start = now - timedelta(days=180)
+        bars = fetch_bars(SYMBOL, start, now, timeframe="1Day", limit=250)
+        candles = normalize_candles(bars)
+        if not candles:
+            return unknown_daily_ai_context("no daily bars returned")
+
+        ema9 = latest_indicator_value(calc_ema(candles, 9))
+        ema20 = latest_indicator_value(calc_ema(candles, 20))
+        latest = candles[-1]
+        previous = candles[-2] if len(candles) >= 2 else None
+        price = current_price if current_price is not None else latest.get("close")
+
+        if price is not None and ema9 is not None and ema20 is not None and price > ema9 > ema20:
+            bias = "bullish"
+            trend_state = "BULLISH"
+        elif price is not None and ema9 is not None and ema20 is not None and price < ema9 < ema20:
+            bias = "bearish"
+            trend_state = "BEARISH"
+        else:
+            bias = "neutral"
+            trend_state = "MIXED"
+
+        recent = candles[-4:]
+        if len(recent) >= 3 and all(
+            recent[i]["high"] > recent[i - 1]["high"] and recent[i]["low"] > recent[i - 1]["low"]
+            for i in range(1, len(recent))
+        ):
+            structure = "bullish"
+        elif len(recent) >= 3 and all(
+            recent[i]["high"] < recent[i - 1]["high"] and recent[i]["low"] < recent[i - 1]["low"]
+            for i in range(1, len(recent))
+        ):
+            structure = "bearish"
+        else:
+            structure = "neutral"
+
+        return {
+            "timeframe": "Daily",
+            "data_status": "ok",
+            "latest_close": round_price(latest.get("close")),
+            "latest_candle_direction": candle_direction(latest),
+            "previous_candle_direction": candle_direction(previous),
+            "vwap": None,
+            "ema9": round_price(ema9),
+            "ema20": round_price(ema20),
+            "price_relation_to_vwap": "not_applicable",
+            "price_relation_to_ema9": price_relation(price, ema9),
+            "price_relation_to_ema20": price_relation(price, ema20),
+            "trend_state": trend_state,
+            "daily_bias": bias,
+            "daily_structure": structure,
+            "previous_daily_high": round_price(previous.get("high")) if previous else None,
+            "previous_daily_low": round_price(previous.get("low")) if previous else None,
+            "previous_daily_close": round_price(previous.get("close")) if previous else None,
+            "price_relation_to_previous_daily_high": price_relation(price, previous.get("high") if previous else None),
+            "price_relation_to_previous_daily_low": price_relation(price, previous.get("low") if previous else None),
+            "price_relation_to_previous_daily_close": price_relation(price, previous.get("close") if previous else None),
+            "most_recent_confirmation_setup": None,
+            "best_setup": None,
+            "professional_grade": None,
+            "professional_score": None,
+            "confirmation_stage": None,
+            "setup_status": "BIAS_ONLY",
+            "risk_reward": None,
+            "warnings": [],
+            "checks": {"daily_bars": len(candles)},
+            "nearest_support": None,
+            "nearest_resistance": None,
+            "nearest_demand_zone": None,
+            "nearest_supply_zone": None,
+            "read_only": True,
+        }
+    except Exception as e:
+        return unknown_daily_ai_context(str(e))
+
+
+def chart_payload_for_ai(timeframe):
+    response = chart_data(timeframe_override=timeframe, include_logging=False)
+    if isinstance(response, tuple):
+        response = response[0]
+    return response.get_json()
+
+
+def build_ai_chart_snapshot(requested_timeframe="5Min"):
+    requested_timeframe = requested_timeframe if requested_timeframe in {*TIMEFRAMES, "Daily"} else "5Min"
+    now = datetime.now(ET)
+
+    with _ai_snapshot_lock:
+        cached = _ai_snapshot_cache.get(requested_timeframe) or {}
+        cached_at = cached.get("built_at")
+        cached_snapshot = cached.get("snapshot")
+        if cached_at and cached_snapshot and (now - cached_at).total_seconds() < AI_SNAPSHOT_CACHE_SECONDS:
+            snapshot = dict(cached_snapshot)
+            snapshot["cache_status"] = "hit"
+            snapshot["ai_event"] = current_ai_event_metadata()
+            return snapshot
+
+    intraday_payloads = {
+        timeframe: chart_payload_for_ai(timeframe)
+        for timeframe in ["1Min", "5Min", "15Min"]
+    }
+    timeframe_contexts = {
+        timeframe: compact_intraday_ai_context(payload)
+        for timeframe, payload in intraday_payloads.items()
+    }
+    current_price = intraday_payloads.get(requested_timeframe, {}).get("current_price")
+    if current_price is None:
+        current_price = next(
+            (payload.get("current_price") for payload in intraday_payloads.values() if payload.get("current_price") is not None),
+            None,
+        )
+    timeframe_contexts["Daily"] = build_daily_ai_context(current_price=current_price)
+    if current_price is None:
+        current_price = timeframe_contexts["Daily"].get("latest_close")
+
+    requested_payload = intraday_payloads.get(requested_timeframe) or intraday_payloads.get("5Min") or {}
+    professional_context = requested_payload.get("professional_context") or {}
+    regime = professional_context.get("aapl", {}).get("regime", {})
+    market_confirmation = professional_context.get("market_confirmation") or {}
+    snapshot = {
+        "symbol": SYMBOL,
+        "timestamp": now.isoformat(),
+        "current_price": round_price(current_price),
+        "requested_timeframe": requested_timeframe,
+        "timeframes": timeframe_contexts,
+        "market_context": {
+            "market_regime": regime.get("regime"),
+            "action_label": regime.get("action_label"),
+            "trend_score": regime.get("trend_score"),
+            "range_score": regime.get("range_score"),
+            "chop_score": regime.get("chop_score"),
+            "regime_confidence": regime.get("regime_confidence"),
+            "market_confirmation": market_confirmation.get(
+                "market_confirmation",
+                professional_context.get("market_alignment"),
+            ),
+            "market_confirmation_score": market_confirmation.get(
+                "market_confirmation_score",
+                professional_context.get("market_confirmation_score"),
+            ),
+            "spy_bias": market_confirmation.get("spy_bias", professional_context.get("spy_bias")),
+            "qqq_bias": market_confirmation.get("qqq_bias", professional_context.get("qqq_bias")),
+            "aapl_relative_strength": market_confirmation.get(
+                "aapl_relative_strength",
+                professional_context.get("aapl_relative_strength"),
+            ),
+            "warnings": list(dict.fromkeys(
+                (professional_context.get("warnings") or [])
+                + (market_confirmation.get("market_warnings") or [])
+            )),
+            "read_only": True,
+        },
+        "best_setup": select_best_ai_setup(timeframe_contexts),
+        "cache_status": "miss",
+        "read_only": True,
+    }
+    snapshot["ai_event"] = detect_ai_review_event(snapshot)
+
+    with _ai_snapshot_lock:
+        _ai_snapshot_cache[requested_timeframe] = {
+            "built_at": now,
+            "snapshot": snapshot,
+        }
+
+    return snapshot
+
+
+def valid_number(value):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def evaluate_ai_entry_marker_gates(snapshot, best_setup):
+    """
+    Deterministic read-only marker gates. AI commentary cannot override them.
+    """
+    snapshot = snapshot or {}
+    best_setup = best_setup or {}
+    market_context = snapshot.get("market_context") or {}
+    risk_reward = best_setup.get("risk_reward") or {}
+    direction = best_setup.get("direction")
+    current_price = snapshot.get("current_price")
+    suggested_entry = risk_reward.get("suggested_entry")
+    invalidation = risk_reward.get("invalidation")
+    stop_distance = risk_reward.get("stop_distance")
+    checks = best_setup.get("quality_checks") or {}
+    atr14 = checks.get("atr14")
+    warnings = []
+    gate_checks = {}
+
+    def gate(name, passed, warning):
+        gate_checks[name] = bool(passed)
+        if not passed:
+            warnings.append(warning)
+
+    gate("setup_exists", bool(best_setup), "No best setup exists.")
+    gate(
+        "confirmation_stage_confirmed",
+        best_setup.get("confirmation_stage") == "CONFIRMED",
+        "Setup confirmation stage is not CONFIRMED.",
+    )
+    gate(
+        "professional_grade_allowed",
+        best_setup.get("professional_grade") in {"A", "A+"},
+        "Professional grade must be A or A+.",
+    )
+    gate(
+        "risk_reward_allowed",
+        risk_reward.get("rr_grade") in {"GOOD", "OK"},
+        "Risk/reward grade must be GOOD or OK.",
+    )
+    gate(
+        "setup_not_invalidated",
+        best_setup.get("status") != "INVALIDATED",
+        "Setup is INVALIDATED.",
+    )
+    gate(
+        "setup_not_failed",
+        best_setup.get("confirmation_stage") != "FAILED",
+        "Setup confirmation stage is FAILED.",
+    )
+    gate(
+        "regime_not_chop",
+        market_context.get("market_regime") != "CHOP",
+        "Market regime is CHOP.",
+    )
+    gate(
+        "action_allows_new_trades",
+        market_context.get("action_label") != "NO_NEW_TRADES",
+        "Market action label is NO_NEW_TRADES.",
+    )
+
+    market_confirmation = market_context.get("market_confirmation")
+    market_opposes = (
+        (direction == "bullish" and market_confirmation == "BEARISH")
+        or (direction == "bearish" and market_confirmation == "BULLISH")
+    )
+    gate(
+        "market_not_directly_against",
+        not market_opposes,
+        f"Market confirmation {market_confirmation} directly opposes the {direction or 'unknown'} setup.",
+    )
+    gate(
+        "valid_suggested_entry",
+        valid_number(suggested_entry),
+        "Suggested entry is unavailable or invalid.",
+    )
+    gate(
+        "valid_invalidation",
+        valid_number(invalidation),
+        "Invalidation is unavailable or invalid.",
+    )
+    gate(
+        "valid_current_price",
+        valid_number(current_price),
+        "Current price is unavailable or invalid.",
+    )
+
+    extension_distance = (
+        abs(current_price - suggested_entry)
+        if valid_number(current_price) and valid_number(suggested_entry)
+        else None
+    )
+    extension_limit = None
+    extension_basis = "unavailable"
+    if valid_number(suggested_entry) and suggested_entry > 0 and valid_number(stop_distance) and stop_distance > 0:
+        extension_limit = max(stop_distance * 0.75, suggested_entry * 0.0015)
+        extension_basis = "stop_distance"
+    elif valid_number(suggested_entry) and suggested_entry > 0 and valid_number(atr14) and atr14 > 0:
+        extension_limit = max(atr14 * 0.75, suggested_entry * 0.0015)
+        extension_basis = "atr14"
+    elif valid_number(suggested_entry) and suggested_entry > 0:
+        extension_limit = suggested_entry * 0.003
+        extension_basis = "percentage"
+
+    extension_ok = (
+        extension_distance is not None
+        and extension_limit is not None
+        and extension_distance <= extension_limit
+    )
+    gate(
+        "price_not_too_extended",
+        extension_ok,
+        (
+            f"Current price is too extended from suggested entry "
+            f"({round_price(extension_distance)} away; limit {round_price(extension_limit)} using {extension_basis})."
+            if extension_distance is not None and extension_limit is not None
+            else "Price extension cannot be validated."
+        ),
+    )
+
+    return {
+        "allow_entry_marker": all(gate_checks.values()),
+        "checks": gate_checks,
+        "warnings": list(dict.fromkeys(warnings)),
+        "extension": {
+            "distance": round_price(extension_distance),
+            "limit": round_price(extension_limit),
+            "basis": extension_basis,
+            "read_only": True,
+        },
+        "read_only": True,
+    }
+
+
+def build_ai_event_fingerprint(snapshot):
+    snapshot = snapshot or {}
+    setup = snapshot.get("best_setup") or {}
+    risk_reward = setup.get("risk_reward") or {}
+    market_context = snapshot.get("market_context") or {}
+    gates = evaluate_ai_entry_marker_gates(snapshot, setup)
+    five_min = (snapshot.get("timeframes") or {}).get("5Min") or {}
+
+    return {
+        "setup_exists": bool(setup),
+        "setup_identity": "|".join(str(value) for value in [
+            setup.get("timeframe"),
+            setup.get("source"),
+            setup.get("level_price"),
+            setup.get("candle_time"),
+        ]) if setup else None,
+        "direction": setup.get("direction"),
+        "confirmation_stage": setup.get("confirmation_stage"),
+        "status": setup.get("status"),
+        "professional_grade": setup.get("professional_grade"),
+        "rr_grade": risk_reward.get("rr_grade"),
+        "market_regime": market_context.get("market_regime"),
+        "action_label": market_context.get("action_label"),
+        "market_confirmation": market_context.get("market_confirmation"),
+        "price_too_extended": not gates.get("checks", {}).get("price_not_too_extended", False),
+        "five_min_candle_time": five_min.get("latest_candle_time"),
+        "read_only": True,
+    }
+
+
+def compare_ai_event_fingerprints(previous, current):
+    if not previous:
+        return []
+
+    reasons = []
+    active_quality = current.get("professional_grade") in {"A+", "A", "B"}
+
+    if not previous.get("setup_exists") and current.get("setup_exists"):
+        reasons.append("New best setup appeared.")
+    elif previous.get("setup_identity") != current.get("setup_identity") and current.get("setup_exists"):
+        reasons.append("Best setup changed.")
+
+    if previous.get("direction") and previous.get("direction") != current.get("direction"):
+        reasons.append(f"Best setup direction changed to {current.get('direction')}.")
+
+    previous_stage = previous.get("confirmation_stage")
+    current_stage = current.get("confirmation_stage")
+    if previous_stage == "WATCH" and current_stage == "EARLY_CONFIRM":
+        reasons.append("Setup changed from WATCH to EARLY_CONFIRM.")
+    if previous_stage == "EARLY_CONFIRM" and current_stage == "CONFIRMED":
+        reasons.append("Setup changed from EARLY_CONFIRM to CONFIRMED.")
+    if current_stage == "FAILED" and previous_stage != "FAILED":
+        reasons.append("Setup changed to FAILED.")
+
+    if current.get("status") == "INVALIDATED" and previous.get("status") != "INVALIDATED":
+        reasons.append("Setup became INVALIDATED.")
+
+    if current.get("professional_grade") in {"A", "A+"} and previous.get("professional_grade") not in {"A", "A+"}:
+        reasons.append(f"Setup became {current.get('professional_grade')}.")
+
+    if current.get("rr_grade") in {"GOOD", "OK"} and previous.get("rr_grade") not in {"GOOD", "OK"} and current.get("professional_grade") in {"A", "A+"}:
+        reasons.append(f"Risk/reward improved to {current.get('rr_grade')} for an A/A+ setup.")
+    if current.get("rr_grade") in {"WEAK", "BAD"} and previous.get("rr_grade") not in {"WEAK", "BAD"}:
+        reasons.append(f"Risk/reward weakened to {current.get('rr_grade')}.")
+
+    if previous.get("market_regime") != current.get("market_regime"):
+        reasons.append(f"Market regime changed to {current.get('market_regime')}.")
+    if current.get("action_label") == "NO_NEW_TRADES" and previous.get("action_label") != "NO_NEW_TRADES":
+        reasons.append("Action label changed to NO_NEW_TRADES.")
+    if previous.get("market_confirmation") != current.get("market_confirmation"):
+        reasons.append(f"SPY/QQQ market confirmation changed to {current.get('market_confirmation')}.")
+    if current.get("price_too_extended") and not previous.get("price_too_extended"):
+        reasons.append("Price became too extended from the suggested entry.")
+
+    if (
+        previous.get("five_min_candle_time") != current.get("five_min_candle_time")
+        and current.get("five_min_candle_time") is not None
+        and active_quality
+    ):
+        reasons.append(f"New 5Min candle closed with an active {current.get('professional_grade')} setup.")
+
+    return list(dict.fromkeys(reasons))
+
+
+def current_ai_event_metadata():
+    with _ai_event_lock:
+        return {
+            "ai_review_recommended": bool(_ai_event_state.get("ai_review_recommended")),
+            "latest_event_reason": _ai_event_state.get("latest_event_reason"),
+            "latest_event_time": _ai_event_state.get("latest_event_time"),
+            "ai_auto_review_enabled": ENABLE_AI_AUTO_REVIEW,
+            "read_only": True,
+        }
+
+
+def detect_ai_review_event(snapshot):
+    fingerprint = build_ai_event_fingerprint(snapshot)
+    now = datetime.now(ET).isoformat()
+
+    with _ai_event_lock:
+        previous = _ai_event_state.get("fingerprint")
+        reasons = compare_ai_event_fingerprints(previous, fingerprint)
+        _ai_event_state["fingerprint"] = fingerprint
+        if reasons:
+            _ai_event_state["ai_review_recommended"] = True
+            _ai_event_state["latest_event_reason"] = " ".join(reasons)
+            _ai_event_state["latest_event_time"] = now
+
+        return {
+            "ai_review_recommended": bool(_ai_event_state.get("ai_review_recommended")),
+            "latest_event_reason": _ai_event_state.get("latest_event_reason"),
+            "latest_event_time": _ai_event_state.get("latest_event_time"),
+            "ai_auto_review_enabled": ENABLE_AI_AUTO_REVIEW,
+            "read_only": True,
+        }
+
+
+def apply_ai_event_metadata(review, acknowledge=False):
+    with _ai_event_lock:
+        if acknowledge:
+            _ai_event_state["ai_review_recommended"] = False
+        review["ai_review_recommended"] = bool(_ai_event_state.get("ai_review_recommended"))
+        review["latest_event_reason"] = _ai_event_state.get("latest_event_reason")
+        review["latest_event_time"] = _ai_event_state.get("latest_event_time")
+        review["ai_auto_review_enabled"] = ENABLE_AI_AUTO_REVIEW
+    return review
+
+
+def build_fallback_ai_review(snapshot, user_message=None):
+    snapshot = snapshot or {}
+    best_setup = snapshot.get("best_setup")
+    market_context = snapshot.get("market_context") or {}
+    gates = evaluate_ai_entry_marker_gates(snapshot, best_setup)
+    setup = best_setup or {}
+    risk_reward = setup.get("risk_reward") or {}
+    grade = setup.get("professional_grade")
+    stage = setup.get("confirmation_stage")
+    direction = setup.get("direction") if setup.get("direction") in {"bullish", "bearish"} else "neutral"
+
+    warnings = list(gates.get("warnings") or [])
+    warnings.extend(risk_reward.get("rr_warnings") or [])
+    warnings.extend(market_context.get("warnings") or [])
+    warnings = list(dict.fromkeys(warnings))
+
+    if not best_setup:
+        decision = "WAIT"
+        confidence = 10
+        summary = "No current confirmation setup is available. Wait for a structured setup."
+    elif gates["allow_entry_marker"]:
+        decision = "PLAN_READY"
+        confidence = min(95, max(75, int(setup.get("professional_score") or 75)))
+        summary = (
+            f"{grade} {direction} setup is confirmed and passes all strict read-only marker gates. "
+            "Confirm manually before taking any action."
+        )
+    elif grade in {"NO_TRADE", "C"} or stage == "FAILED" or setup.get("status") == "INVALIDATED":
+        decision = "AVOID" if grade == "NO_TRADE" or stage == "FAILED" or setup.get("status") == "INVALIDATED" else "WAIT"
+        confidence = min(45, int(setup.get("professional_score") or 20))
+        summary = f"{grade or 'Unrated'} setup does not meet strict trade-review quality requirements."
+    elif grade == "B" or stage == "EARLY_CONFIRM":
+        decision = "WATCH"
+        confidence = min(65, max(30, int(setup.get("professional_score") or 40)))
+        summary = "Setup is forming but still needs stronger confirmation before it can be plan ready."
+    elif grade in {"A", "A+"}:
+        decision = "WATCH" if stage in {"EARLY_CONFIRM", "CONFIRMED"} else "WAIT"
+        confidence = min(75, max(40, int(setup.get("professional_score") or 55)))
+        summary = f"{grade} setup exists, but one or more hard marker gates are blocking entry guidance."
+    else:
+        decision = "WAIT"
+        confidence = min(50, int(setup.get("professional_score") or 20))
+        summary = "Current setup evidence is incomplete. Wait for clearer confirmation."
+
+    entry_conditions = []
+    if best_setup:
+        if stage != "CONFIRMED":
+            entry_conditions.append("Wait for confirmation_stage = CONFIRMED.")
+        if grade not in {"A", "A+"}:
+            entry_conditions.append("Wait for professional grade A or A+.")
+        if risk_reward.get("rr_grade") not in {"GOOD", "OK"}:
+            entry_conditions.append("Require GOOD or OK risk/reward.")
+        if market_context.get("market_regime") == "CHOP":
+            entry_conditions.append("Wait for AAPL to leave CHOP.")
+        if market_context.get("action_label") == "NO_NEW_TRADES":
+            entry_conditions.append("Wait until the action label allows new trades.")
+        if not gates["checks"].get("market_not_directly_against"):
+            entry_conditions.append("Wait for broader-market confirmation to stop opposing the setup.")
+        if not gates["checks"].get("price_not_too_extended"):
+            entry_conditions.append("Wait for price to return near the suggested entry without chasing.")
+
+    allow_marker = gates["allow_entry_marker"]
+    marker_price = risk_reward.get("suggested_entry") if allow_marker else None
+    marker_label = (
+        "ENTER TRADE SETUP — POSSIBLE ENTRY — NOT AN ORDER"
+        if allow_marker
+        else ""
+    )
+    snapshot_summary = {
+        "symbol": snapshot.get("symbol"),
+        "timestamp": snapshot.get("timestamp"),
+        "requested_timeframe": snapshot.get("requested_timeframe"),
+        "current_price": snapshot.get("current_price"),
+        "best_setup_timeframe": setup.get("timeframe") if best_setup else None,
+        "professional_grade": grade,
+        "professional_score": setup.get("professional_score") if best_setup else None,
+        "confirmation_stage": stage,
+        "setup_status": setup.get("status") if best_setup else None,
+        "rr_grade": risk_reward.get("rr_grade") if best_setup else None,
+        "market_regime": market_context.get("market_regime"),
+        "action_label": market_context.get("action_label"),
+        "market_confirmation": market_context.get("market_confirmation"),
+        "gate_checks": gates.get("checks"),
+        "extension": gates.get("extension"),
+        "user_message": user_message,
+        "read_only": True,
+    }
+
+    review = {
+        "decision": decision,
+        "bias": direction,
+        "confidence": max(0, min(100, int(confidence))),
+        "summary": f"{summary} {AI_REVIEW_SAFETY_TEXT}",
+        "what_ai_sees": summary,
+        "professional_reasoning": (
+            "The deterministic chart engines, strict grade, confirmation stage, market context, "
+            "risk/reward, and hard marker gates remain the source of truth."
+        ),
+        "entry_conditions": entry_conditions,
+        "trap_warnings": [
+            warning for warning in warnings
+            if any(term in warning.lower() for term in ["trap", "sweep", "failed", "invalid", "oppos", "chop"])
+        ],
+        "options_risk_notes": [
+            "Short-dated and 0DTE options can decay quickly if the setup stalls or chops.",
+            "A correct stock direction can still disappoint because of timing, implied volatility, spreads, and slippage.",
+        ],
+        "exit_plan": {
+            "invalidation": risk_reward.get("invalidation"),
+            "target_1": risk_reward.get("target_1"),
+            "target_2": risk_reward.get("target_2"),
+            "target_3": risk_reward.get("target_3"),
+        },
+        "allow_entry_marker": allow_marker,
+        "entry_marker": {
+            "price": marker_price,
+            "label": marker_label,
+            "direction": direction if allow_marker else "neutral",
+        },
+        "warnings": warnings,
+        "do_not_chase": AI_REVIEW_SAFETY_TEXT,
+        "manual_confirmation_checklist": [
+            "Confirm the setup and direction manually.",
+            "Confirm entry, invalidation, and realistic targets.",
+            "Confirm SPY/QQQ and market regime are not opposing the setup.",
+            "Confirm price has not extended away from the suggested entry.",
+        ],
+        "read_only": True,
+        "not_financial_advice": True,
+        "not_an_order": True,
+        "source": "fallback",
+        "snapshot_summary": snapshot_summary,
+    }
+    return review
+
+
+def ai_trade_review_json_schema():
+    string_list = {"type": "array", "items": {"type": "string"}}
+    nullable_number = {"type": ["number", "null"]}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "decision": {"type": "string", "enum": ["WAIT", "AVOID", "WATCH", "PLAN_READY"]},
+            "bias": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+            "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+            "summary": {"type": "string"},
+            "what_ai_sees": {"type": "string"},
+            "professional_reasoning": {"type": "string"},
+            "entry_conditions": string_list,
+            "trap_warnings": string_list,
+            "options_risk_notes": string_list,
+            "exit_plan": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "invalidation": nullable_number,
+                    "target_1": nullable_number,
+                    "target_2": nullable_number,
+                    "target_3": nullable_number,
+                },
+                "required": ["invalidation", "target_1", "target_2", "target_3"],
+            },
+            "allow_entry_marker": {"type": "boolean"},
+            "entry_marker": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "price": nullable_number,
+                    "label": {"type": "string"},
+                    "direction": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+                },
+                "required": ["price", "label", "direction"],
+            },
+            "warnings": string_list,
+            "do_not_chase": {"type": "string"},
+            "manual_confirmation_checklist": string_list,
+            "read_only": {"type": "boolean"},
+            "not_financial_advice": {"type": "boolean"},
+            "not_an_order": {"type": "boolean"},
+            "source": {"type": "string", "enum": ["openai", "fallback"]},
+        },
+        "required": [
+            "decision",
+            "bias",
+            "confidence",
+            "summary",
+            "what_ai_sees",
+            "professional_reasoning",
+            "entry_conditions",
+            "trap_warnings",
+            "options_risk_notes",
+            "exit_plan",
+            "allow_entry_marker",
+            "entry_marker",
+            "warnings",
+            "do_not_chase",
+            "manual_confirmation_checklist",
+            "read_only",
+            "not_financial_advice",
+            "not_an_order",
+            "source",
+        ],
+    }
+
+
+def load_ai_trading_playbook():
+    try:
+        with open(AI_PLAYBOOK_PATH, "r", encoding="utf-8") as playbook:
+            return playbook.read()
+    except Exception as e:
+        return f"Playbook unavailable. Preserve strict read-only safety doctrine. Error: {e}"
+
+
+def extract_openai_response_text(response_payload):
+    for item in response_payload.get("output", []) or []:
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content", []) or []:
+            if content.get("type") == "output_text" and content.get("text"):
+                return content["text"]
+            if content.get("type") == "refusal":
+                raise RuntimeError(f"OpenAI refused the review: {content.get('refusal')}")
+    raise RuntimeError("OpenAI response did not contain structured output text.")
+
+
+def call_openai_trade_review(snapshot, user_message=None):
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OpenAI API key not configured.")
+
+    model = os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
+    playbook = load_ai_trading_playbook()
+    prompt_payload = {
+        "user_message": user_message,
+        "snapshot": snapshot,
+        "hard_gates": evaluate_ai_entry_marker_gates(snapshot, snapshot.get("best_setup")),
+    }
+    system_prompt = (
+        "You are a strict professional intraday AAPL stock/options review assistant. "
+        "The deterministic chart engine and backend hard gates are the source of truth. "
+        "You cannot override gates, place trades, tell the user to buy or sell now, claim certainty, "
+        "or remove risk warnings. Prefer WAIT over a forced setup. Return only the required JSON. "
+        f"Every review must preserve this exact safety text: {AI_REVIEW_SAFETY_TEXT}\n\n"
+        f"TRADING PLAYBOOK:\n{playbook}"
+    )
+    response = requests.post(
+        OPENAI_RESPONSES_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "store": False,
+            "input": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        "Review this compact multi-timeframe chart snapshot and explain possible traps, "
+                        "no-go conditions, what must happen before entry, confidence, and options risk if "
+                        "the setup stalls. Backend gates cannot be overridden.\n"
+                        + json.dumps(prompt_payload, separators=(",", ":"), sort_keys=True)
+                    ),
+                },
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "ai_trade_review",
+                    "strict": True,
+                    "schema": ai_trade_review_json_schema(),
+                }
+            },
+        },
+        timeout=45,
+    )
+    if not response.ok:
+        try:
+            detail = response.json().get("error", {}).get("message")
+        except Exception:
+            detail = None
+        raise RuntimeError(f"OpenAI request failed ({response.status_code}): {detail or response.text[:200]}")
+
+    return json.loads(extract_openai_response_text(response.json()))
+
+
+def normalize_openai_trade_review(review, snapshot, fallback_review):
+    if not isinstance(review, dict):
+        raise ValueError("OpenAI review is not a JSON object.")
+
+    forbidden = [
+        "buy now",
+        "sell now",
+        "guaranteed",
+        "this will work",
+        "ignore your stop",
+        "enter without confirmation",
+        "i placed the trade",
+    ]
+    review_text = json.dumps(review).lower()
+    if any(phrase in review_text for phrase in forbidden):
+        raise ValueError("OpenAI review contained forbidden certainty or order language.")
+
+    gates = evaluate_ai_entry_marker_gates(snapshot, snapshot.get("best_setup"))
+    final = dict(fallback_review)
+    for key in [
+        "decision",
+        "bias",
+        "confidence",
+        "summary",
+        "what_ai_sees",
+        "professional_reasoning",
+        "entry_conditions",
+        "trap_warnings",
+        "options_risk_notes",
+        "exit_plan",
+        "warnings",
+        "do_not_chase",
+        "manual_confirmation_checklist",
+    ]:
+        if key in review:
+            final[key] = review[key]
+
+    final["confidence"] = max(0, min(100, int(final.get("confidence") or 0)))
+    final["warnings"] = list(dict.fromkeys(
+        (final.get("warnings") or [])
+        + (fallback_review.get("warnings") or [])
+        + (gates.get("warnings") or [])
+    ))
+    final["summary"] = f"{str(final.get('summary') or '').strip()} {AI_REVIEW_SAFETY_TEXT}".strip()
+    final["do_not_chase"] = AI_REVIEW_SAFETY_TEXT
+    final["read_only"] = True
+    final["not_financial_advice"] = True
+    final["not_an_order"] = True
+    final["source"] = "openai"
+    final["snapshot_summary"] = fallback_review.get("snapshot_summary", {})
+
+    if gates["allow_entry_marker"]:
+        best_setup = snapshot.get("best_setup") or {}
+        risk_reward = best_setup.get("risk_reward") or {}
+        final["allow_entry_marker"] = True
+        final["decision"] = "PLAN_READY"
+        final["entry_marker"] = {
+            "price": risk_reward.get("suggested_entry"),
+            "label": "ENTER TRADE SETUP — POSSIBLE ENTRY — NOT AN ORDER",
+            "direction": best_setup.get("direction") if best_setup.get("direction") in {"bullish", "bearish"} else "neutral",
+        }
+    else:
+        final["allow_entry_marker"] = False
+        final["entry_marker"] = {"price": None, "label": "", "direction": "neutral"}
+        final["decision"] = fallback_review.get("decision") if fallback_review.get("decision") in {"WAIT", "WATCH", "AVOID"} else "WAIT"
+
+    return final
+
+
+def build_ai_trade_review(snapshot, user_message=None):
+    fallback_review = build_fallback_ai_review(snapshot, user_message=user_message)
+    if not os.getenv("OPENAI_API_KEY"):
+        fallback_review["warnings"] = list(dict.fromkeys(
+            (fallback_review.get("warnings") or []) + ["OpenAI API key not configured."]
+        ))
+        return fallback_review
+
+    try:
+        review = call_openai_trade_review(snapshot, user_message=user_message)
+        return normalize_openai_trade_review(review, snapshot, fallback_review)
+    except Exception as e:
+        fallback_review["warnings"] = list(dict.fromkeys(
+            (fallback_review.get("warnings") or []) + [f"OpenAI review unavailable: {e}"]
+        ))
+        return fallback_review
+
+
 @APP.route("/")
 def home():
     return send_from_directory("static", "index_stream.html")
@@ -3954,8 +5065,8 @@ def app_stream_js():
 
 
 @APP.route("/api/chart/aapl")
-def chart_data():
-    tf = request.args.get("timeframe", "1Min")
+def chart_data(timeframe_override=None, include_logging=True):
+    tf = timeframe_override or request.args.get("timeframe", "1Min")
     timeframe = tf if tf in TIMEFRAMES else "1Min"
 
     now = datetime.now(ET)
@@ -4169,20 +5280,24 @@ def chart_data():
             professional_context,
         )
 
-        logged_setups = log_confirmation_setups(
-            SYMBOL,
-            timeframe,
-            confirmation_setups,
-            professional_context,
-            current_price=current_price,
-        )
+        if include_logging:
+            logged_setups = log_confirmation_setups(
+                SYMBOL,
+                timeframe,
+                confirmation_setups,
+                professional_context,
+                current_price=current_price,
+            )
 
-        setup_outcomes = evaluate_setup_outcomes(
-            SYMBOL,
-            timeframe,
-            indicators_source,
-            confirmation_setups,
-        )
+            setup_outcomes = evaluate_setup_outcomes(
+                SYMBOL,
+                timeframe,
+                indicators_source,
+                confirmation_setups,
+            )
+        else:
+            logged_setups = 0
+            setup_outcomes = []
 
         return jsonify({
             "symbol": SYMBOL,
@@ -4232,6 +5347,46 @@ def chart_data():
             "data_status": "error",
             "errors": [str(e)],
         }), 500
+
+
+@APP.route("/api/ai/snapshot")
+def ai_chart_snapshot():
+    timeframe = request.args.get("timeframe", "5Min")
+    return jsonify(build_ai_chart_snapshot(timeframe))
+
+
+@APP.route("/api/ai/latest-review")
+def latest_ai_review():
+    timeframe = request.args.get("timeframe", "5Min")
+    try:
+        build_ai_chart_snapshot(timeframe)
+    except Exception:
+        pass
+
+    with _latest_ai_review_lock:
+        review = dict(LATEST_AI_REVIEW)
+    return jsonify(apply_ai_event_metadata(review))
+
+
+@APP.route("/api/ai/review-current-chart", methods=["GET", "POST"])
+def review_current_chart():
+    global LATEST_AI_REVIEW
+
+    timeframe = request.args.get("timeframe", "5Min")
+    user_message = request.args.get("message")
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        timeframe = payload.get("timeframe", timeframe)
+        user_message = payload.get("user_message", payload.get("message", user_message))
+
+    snapshot = build_ai_chart_snapshot(timeframe)
+    review = build_ai_trade_review(snapshot, user_message=user_message)
+    review = apply_ai_event_metadata(review, acknowledge=True)
+
+    with _latest_ai_review_lock:
+        LATEST_AI_REVIEW = review
+
+    return jsonify(review)
 
 
 @APP.route("/api/stream/aapl")
@@ -4423,12 +5578,115 @@ def performance_dashboard():
       padding: 7px 10px;
       font-size: 12px;
     }
+    .ai-panel {
+      background: #0e1622;
+      border: 1px solid #334963;
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 22px;
+      box-shadow: 0 10px 28px rgba(0,0,0,.25);
+    }
+    .ai-panel-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .ai-panel h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+    .ai-safety {
+      color: #f6c76f;
+      font-size: 12px;
+      margin: 8px 0 14px;
+    }
+    .ai-recommendation {
+      color: #9aa7b8;
+      font-size: 12px;
+      margin: -6px 0 14px;
+    }
+    .ai-recommendation.active {
+      color: #f6c76f;
+      font-weight: bold;
+    }
+    .ai-controls {
+      display: grid;
+      grid-template-columns: minmax(120px, 160px) minmax(160px, auto) minmax(260px, 1fr) minmax(100px, auto);
+      gap: 10px;
+      align-items: end;
+    }
+    .ai-question {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .ai-question label {
+      color: #9aa7b8;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .ai-review {
+      margin-top: 14px;
+      display: none;
+    }
+    .ai-review.visible {
+      display: block;
+    }
+    .ai-review-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .ai-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(240px, 1fr));
+      gap: 10px;
+    }
+    .ai-section {
+      background: #111b29;
+      border: 1px solid #29394e;
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .ai-section h3 {
+      margin: 0 0 7px;
+      color: #aebbd0;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .ai-section p {
+      margin: 0;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+    .ai-section ul {
+      margin: 0;
+      padding-left: 18px;
+      line-height: 1.45;
+    }
+    .ai-decision {
+      font-size: 22px;
+      font-weight: bold;
+    }
+    .ai-decision.plan-ready { color: #76e39a; }
+    .ai-decision.watch { color: #f6c76f; }
+    .ai-decision.wait { color: #b7c4d8; }
+    .ai-decision.avoid { color: #ff8b8b; }
+    .ai-marker-allowed { color: #76e39a; }
+    .ai-marker-blocked { color: #ff8b8b; }
     @media (max-width: 1000px) {
       .grid {
         grid-template-columns: repeat(2, minmax(140px, 1fr));
       }
       .controls {
         grid-template-columns: repeat(2, minmax(130px, 1fr));
+      }
+      .ai-controls, .ai-review-grid, .ai-detail-grid {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -4438,6 +5696,55 @@ def performance_dashboard():
   <div class="sub">
     Read-only review of logged chart setups. These are not executed trades.
   </div>
+
+  <section class="ai-panel" aria-labelledby="aiReviewTitle">
+    <div class="ai-panel-header">
+      <h2 id="aiReviewTitle">AI Trade Review</h2>
+      <span id="aiStatus" class="neutral">Ready for review</span>
+    </div>
+    <div class="ai-safety">
+      Read-only review. Not financial advice. Not an order. Confirm manually. Do not chase.
+    </div>
+    <div id="aiRecommendation" class="ai-recommendation">No new AI review recommendation.</div>
+    <div class="ai-controls">
+      <div class="control">
+        <label for="aiTimeframe">Timeframe</label>
+        <select id="aiTimeframe">
+          <option value="1Min">1Min</option>
+          <option value="5Min" selected>5Min</option>
+          <option value="15Min">15Min</option>
+          <option value="Daily">Daily</option>
+        </select>
+      </div>
+      <button id="reviewCurrentChartButton" type="button" onclick="reviewCurrentChart()">Review Current Chart</button>
+      <div class="ai-question">
+        <label for="aiQuestion">Question</label>
+        <input id="aiQuestion" type="text" placeholder="Ask the AI what it sees…" />
+      </div>
+      <button id="askAiButton" type="button" onclick="askAi()">Ask AI</button>
+    </div>
+    <div id="aiReview" class="ai-review" aria-live="polite">
+      <div class="ai-review-grid">
+        <div class="ai-section"><h3>Decision</h3><div id="aiDecision" class="ai-decision wait">WAIT</div></div>
+        <div class="ai-section"><h3>Bias</h3><div id="aiBias">neutral</div></div>
+        <div class="ai-section"><h3>Confidence</h3><div id="aiConfidence">0%</div></div>
+        <div class="ai-section"><h3>Entry Marker</h3><div id="aiMarker" class="ai-marker-blocked">Not allowed</div></div>
+      </div>
+      <div class="ai-detail-grid">
+        <div class="ai-section"><h3>Summary</h3><p id="aiSummary"></p></div>
+        <div class="ai-section"><h3>What AI Sees</h3><p id="aiSees"></p></div>
+        <div class="ai-section"><h3>Professional Reasoning</h3><p id="aiReasoning"></p></div>
+        <div class="ai-section"><h3>Entry Conditions</h3><div id="aiEntryConditions"></div></div>
+        <div class="ai-section"><h3>Trap Warnings</h3><div id="aiTrapWarnings"></div></div>
+        <div class="ai-section"><h3>Options Risk Notes</h3><div id="aiOptionsRisk"></div></div>
+        <div class="ai-section"><h3>Exit Plan</h3><div id="aiExitPlan"></div></div>
+        <div class="ai-section"><h3>Manual Confirmation Checklist</h3><div id="aiChecklist"></div></div>
+        <div class="ai-section"><h3>Warnings</h3><div id="aiWarnings"></div></div>
+        <div class="ai-section"><h3>Do Not Chase</h3><p id="aiDoNotChase"></p></div>
+        <div class="ai-section"><h3>Source</h3><p id="aiSource"></p></div>
+      </div>
+    </div>
+  </section>
 
   <div class="controls">
     <div class="control">
@@ -4600,6 +5907,156 @@ def performance_dashboard():
       if (grade === "B" || grade === "C") return "warn";
       return "neutral";
     }
+
+    function setText(id, value) {
+      document.getElementById(id).textContent = value === null || value === undefined || value === "" ? "-" : String(value);
+    }
+
+    function renderAiList(id, values) {
+      const element = document.getElementById(id);
+      const items = Array.isArray(values) ? values.filter(Boolean) : [];
+      element.replaceChildren();
+
+      if (!items.length) {
+        element.textContent = "None";
+        return;
+      }
+
+      const list = document.createElement("ul");
+      for (const value of items) {
+        const item = document.createElement("li");
+        item.textContent = String(value);
+        list.appendChild(item);
+      }
+      element.appendChild(list);
+    }
+
+    function renderAiReview(review) {
+      document.getElementById("aiReview").classList.add("visible");
+      updateAiRecommendation(review);
+
+      const decision = review.decision || "WAIT";
+      const decisionElement = document.getElementById("aiDecision");
+      decisionElement.textContent = decision;
+      decisionElement.className = `ai-decision ${String(decision).toLowerCase().replace("_", "-")}`;
+
+      setText("aiBias", review.bias || "neutral");
+      setText("aiConfidence", `${Number(review.confidence || 0)}%`);
+      setText("aiSummary", review.summary);
+      setText("aiSees", review.what_ai_sees);
+      setText("aiReasoning", review.professional_reasoning);
+      setText("aiDoNotChase", review.do_not_chase);
+      setText("aiSource", review.source || "fallback");
+
+      const marker = document.getElementById("aiMarker");
+      marker.textContent = review.allow_entry_marker ? "Allowed" : "Not allowed";
+      marker.className = review.allow_entry_marker ? "ai-marker-allowed" : "ai-marker-blocked";
+
+      renderAiList("aiEntryConditions", review.entry_conditions);
+      renderAiList("aiTrapWarnings", review.trap_warnings);
+      renderAiList("aiOptionsRisk", review.options_risk_notes);
+      renderAiList("aiChecklist", review.manual_confirmation_checklist);
+      renderAiList("aiWarnings", review.warnings);
+
+      const exit = review.exit_plan || {};
+      renderAiList("aiExitPlan", [
+        `Invalidation: ${fmtNum(exit.invalidation)}`,
+        `Target 1: ${fmtNum(exit.target_1)}`,
+        `Target 2: ${fmtNum(exit.target_2)}`,
+        `Target 3: ${fmtNum(exit.target_3)}`,
+      ]);
+    }
+
+    function updateAiRecommendation(review) {
+      const recommendation = document.getElementById("aiRecommendation");
+      if (!recommendation) return;
+
+      if (review && review.ai_review_recommended) {
+        recommendation.textContent = `AI review recommended because: ${review.latest_event_reason || "actionable chart state changed."}`;
+        recommendation.classList.add("active");
+        return;
+      }
+
+      recommendation.classList.remove("active");
+      recommendation.textContent = review && review.latest_event_reason
+        ? `Last AI event: ${review.latest_event_reason}`
+        : "No new AI review recommendation.";
+    }
+
+    async function loadLatestAiReview() {
+      try {
+        const response = await fetch("/api/ai/latest-review");
+        if (!response.ok) return;
+        updateAiRecommendation(await response.json());
+      } catch (error) {
+        console.warn("Unable to load latest AI review status", error);
+      }
+    }
+
+    async function requestAiReview(userMessage = null) {
+      const timeframe = document.getElementById("aiTimeframe").value;
+      const status = document.getElementById("aiStatus");
+      const reviewButton = document.getElementById("reviewCurrentChartButton");
+      const askButton = document.getElementById("askAiButton");
+
+      status.textContent = userMessage ? "Asking AI..." : "Reviewing current chart...";
+      status.className = "neutral";
+      reviewButton.disabled = true;
+      askButton.disabled = true;
+
+      try {
+        const options = userMessage
+          ? {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ timeframe, user_message: userMessage }),
+            }
+          : { method: "GET" };
+        const url = userMessage
+          ? "/api/ai/review-current-chart"
+          : `/api/ai/review-current-chart?timeframe=${encodeURIComponent(timeframe)}`;
+        const response = await fetch(url, options);
+        const review = await response.json();
+        if (!response.ok) throw new Error(review.error || `Review failed (${response.status})`);
+
+        renderAiReview(review);
+        status.textContent = `Updated ${new Date().toLocaleTimeString()} · ${review.source || "fallback"}`;
+        status.className = review.decision === "AVOID" ? "bad" : review.decision === "PLAN_READY" ? "good" : "warn";
+      } catch (error) {
+        console.error(error);
+        status.textContent = `AI review failed: ${error.message}`;
+        status.className = "bad";
+      } finally {
+        reviewButton.disabled = false;
+        askButton.disabled = false;
+      }
+    }
+
+    function reviewCurrentChart() {
+      return requestAiReview();
+    }
+
+    function askAi() {
+      const input = document.getElementById("aiQuestion");
+      const question = input.value.trim();
+      if (!question) {
+        const status = document.getElementById("aiStatus");
+        status.textContent = "Enter a question first.";
+        status.className = "warn";
+        input.focus();
+        return;
+      }
+      return requestAiReview(question);
+    }
+
+    document.getElementById("aiQuestion").addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        askAi();
+      }
+    });
+    loadLatestAiReview();
+    setInterval(loadLatestAiReview, 30000);
 
     function uniqueValues(rows, key) {
       return [...new Set(rows.map(row => row[key]).filter(v => v !== null && v !== undefined && v !== ""))]

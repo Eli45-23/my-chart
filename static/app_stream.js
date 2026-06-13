@@ -55,12 +55,15 @@ const COLORS = {
   confirmationWatch: "#d500f9",
   confirmationConfirmed: "#ffd600",
   confirmationInvalid: "#9e9e9e",
+  aiEntryBullish: "#58d68d",
+  aiEntryBearish: "#ff7675",
 };
 
 let activeTimeframe = "1Min";
 let eventSource = null;
 let didInitialLoad = false;
 let latestPayload = null;
+let aiEntryPriceLine = null;
 
 const timeframeSeconds = {
   "1Min": 60,
@@ -188,6 +191,63 @@ function clearPriceLines() {
     candleSeries.removePriceLine(line);
   }
   priceLines = [];
+}
+
+function removeAiEntryMarker() {
+  if (!aiEntryPriceLine) return;
+  candleSeries.removePriceLine(aiEntryPriceLine);
+  aiEntryPriceLine = null;
+}
+
+function isValidAiEntryReview(review) {
+  const marker = review?.entry_marker;
+  const label = marker?.label;
+  return (
+    review?.allow_entry_marker === true &&
+    review?.read_only === true &&
+    review?.not_an_order === true &&
+    typeof marker?.price === "number" &&
+    Number.isFinite(marker.price) &&
+    ["bullish", "bearish"].includes(marker.direction) &&
+    typeof label === "string" &&
+    label.includes("ENTER TRADE SETUP") &&
+    label.includes("POSSIBLE ENTRY — NOT AN ORDER")
+  );
+}
+
+function renderAiEntryMarker(review) {
+  removeAiEntryMarker();
+  if (!isValidAiEntryReview(review)) return;
+
+  const marker = review.entry_marker;
+  const directionLabel = marker.direction === "bullish" ? "CALL" : "PUT";
+  const title = [
+    "ENTER TRADE SETUP",
+    "POSSIBLE ENTRY — NOT AN ORDER",
+    directionLabel,
+  ].filter(Boolean).join(" | ");
+
+  aiEntryPriceLine = candleSeries.createPriceLine({
+    price: marker.price,
+    color: marker.direction === "bullish" ? COLORS.aiEntryBullish : COLORS.aiEntryBearish,
+    lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    axisLabelVisible: true,
+    title,
+  });
+}
+
+async function refreshAiEntryMarker() {
+  try {
+    const response = await fetch("/api/ai/latest-review");
+    if (!response.ok) {
+      removeAiEntryMarker();
+      return;
+    }
+    renderAiEntryMarker(await response.json());
+  } catch (_) {
+    removeAiEntryMarker();
+  }
 }
 
 function addLevel(label, price, color, style = LightweightCharts.LineStyle.Solid, showLabel = true, lineWidth = 1) {
@@ -686,6 +746,7 @@ window.addEventListener("resize", () => {
 });
 
 setInterval(updateCountdown, 1000);
+setInterval(refreshAiEntryMarker, 30000);
 
 // Refresh static levels and indicators every 30 seconds.
 // Live candle movement comes from the stream.
@@ -709,3 +770,4 @@ setInterval(() => {
 
 updateCleanModeControl();
 reloadForTimeframe();
+refreshAiEntryMarker();
