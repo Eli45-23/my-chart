@@ -5715,13 +5715,33 @@ def chart_data(timeframe_override=None, include_logging=True):
     try:
         today_bars = fetch_bars(SYMBOL, today_start, today_end, timeframe=timeframe)
         prev_bars = fetch_bars(SYMBOL, prev_start, prev_end, timeframe=timeframe)
+        chart_session_day = day
+        chart_session_historical = False
+        chart_session_reason = None
+
+        if not today_bars:
+            chart_session_day = previous_weekday(day)
+            chart_session_historical = chart_session_day != day
+            if chart_session_historical:
+                chart_session_reason = "No current-session candles available; showing the previous trading session."
+                today_start = et_datetime(chart_session_day, 4, 0)
+                today_end = et_datetime(chart_session_day, 20, 0)
+                prior_session_day = previous_weekday(chart_session_day)
+                prev_start = et_datetime(prior_session_day, 9, 30)
+                prev_end = et_datetime(prior_session_day, 16, 5)
+                today_bars = fetch_bars(SYMBOL, today_start, today_end, timeframe=timeframe)
+                prev_bars = fetch_bars(SYMBOL, prev_start, prev_end, timeframe=timeframe)
 
         levels = calc_levels(today_bars, prev_bars)
         candles = normalize_candles(today_bars)
 
-        current_price = latest_trade["price"] if latest_trade else (candles[-1]["close"] if candles else None)
+        current_price = (
+            candles[-1]["close"]
+            if chart_session_historical and candles
+            else latest_trade["price"] if latest_trade else (candles[-1]["close"] if candles else None)
+        )
 
-        if candles and live_candles.get(timeframe):
+        if candles and live_candles.get(timeframe) and not chart_session_historical:
             if candles[-1]["time"] == live_candles[timeframe]["time"]:
                 candles[-1] = live_candles[timeframe]
             else:
@@ -5913,7 +5933,7 @@ def chart_data(timeframe_override=None, include_logging=True):
             professional_context,
         )
 
-        if include_logging:
+        if include_logging and not chart_session_historical:
             logged_setups = log_confirmation_setups(
                 SYMBOL,
                 timeframe,
@@ -5936,6 +5956,13 @@ def chart_data(timeframe_override=None, include_logging=True):
             "symbol": SYMBOL,
             "timeframe": timeframe,
             "timestamp": now.isoformat(),
+            "chart_session": {
+                "date": chart_session_day.isoformat(),
+                "is_historical": chart_session_historical,
+                "label": "PREVIOUS SESSION" if chart_session_historical else "CURRENT SESSION",
+                "reason": chart_session_reason,
+                "read_only": True,
+            },
             "current_price": current_price,
             "latest_trade": latest_trade,
             "stream_status": stream_status,

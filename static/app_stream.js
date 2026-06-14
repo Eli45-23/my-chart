@@ -74,21 +74,28 @@ const timeframeSeconds = {
 
 const chart = LightweightCharts.createChart(chartEl, {
   layout: {
-    background: { color: "#0f1115" },
-    textColor: "#d6d9df",
+    background: { color: "#0b1017" },
+    textColor: "#aeb9c9",
     attributionLogo: false,
   },
   grid: {
-    vertLines: { color: "#1d2430" },
-    horzLines: { color: "#1d2430" },
+    vertLines: { color: "#17202c" },
+    horzLines: { color: "#17202c" },
   },
   rightPriceScale: {
-    borderColor: "#2d3545",
+    borderColor: "#263448",
+    scaleMargins: {
+      top: 0.08,
+      bottom: 0.08,
+    },
   },
   timeScale: {
-    borderColor: "#2d3545",
+    borderColor: "#263448",
     timeVisible: true,
     secondsVisible: false,
+    rightOffset: 8,
+    barSpacing: 8,
+    minBarSpacing: 3,
   },
   localization: {
     timeFormatter: (time) => {
@@ -103,16 +110,32 @@ const chart = LightweightCharts.createChart(chartEl, {
   },
   crosshair: {
     mode: LightweightCharts.CrosshairMode.Normal,
+    vertLine: {
+      color: "#718096",
+      width: 1,
+      style: LightweightCharts.LineStyle.Dashed,
+      labelBackgroundColor: "#27364a",
+    },
+    horzLine: {
+      color: "#718096",
+      width: 1,
+      style: LightweightCharts.LineStyle.Dashed,
+      labelBackgroundColor: "#27364a",
+    },
   },
 });
 
 const candleSeries = chart.addCandlestickSeries({
-  upColor: "#26a69a",
-  downColor: "#ef5350",
-  borderUpColor: "#26a69a",
-  borderDownColor: "#ef5350",
-  wickUpColor: "#26a69a",
-  wickDownColor: "#ef5350",
+  upColor: "#38ad9f",
+  downColor: "#df6262",
+  borderVisible: true,
+  borderUpColor: "#2d9187",
+  borderDownColor: "#bd5154",
+  wickVisible: true,
+  wickUpColor: "#62c0b5",
+  wickDownColor: "#e77a76",
+  priceLineColor: "#6eb9b0",
+  priceLineStyle: LightweightCharts.LineStyle.Dotted,
 });
 
 const vwapSeries = chart.addLineSeries({
@@ -137,6 +160,22 @@ const ema20Series = chart.addLineSeries({
 });
 
 let priceLines = [];
+
+function focusRecentCandles(candles) {
+  const count = Array.isArray(candles) ? candles.length : 0;
+  if (!count) return;
+
+  const visibleBars = activeTimeframe === "1Min" ? 190 : activeTimeframe === "5Min" ? 130 : 90;
+  if (count <= visibleBars) {
+    chart.timeScale().fitContent();
+    return;
+  }
+
+  chart.timeScale().setVisibleLogicalRange({
+    from: count - visibleBars,
+    to: count + 8,
+  });
+}
 
 function isLayerVisible(layer) {
   const cleanModeHiddenLayers = ["liquiditySweeps", "clusters", "reactionZones"];
@@ -436,6 +475,7 @@ function updateLegend(data) {
   const latestEMA9 = indicators.ema9?.length ? indicators.ema9[indicators.ema9.length - 1].value : null;
   const latestEMA20 = indicators.ema20?.length ? indicators.ema20[indicators.ema20.length - 1].value : null;
   const stream = latestPayload.stream_status || {};
+  const chartSession = latestPayload.chart_session || {};
   const trade = latestPayload.latest_trade;
   const setups = latestPayload.confirmation_setups?.setups || [];
   const demandZones = chartSupplyDemandZones(latestPayload.supply_demand?.demand);
@@ -448,6 +488,7 @@ function updateLegend(data) {
 
   const sessionItems = [
     textPill(`Timeframe ${activeTimeframe.replace("Min", "m")}`),
+    chartSession.is_historical ? textPill(`${chartSession.label || "PREVIOUS SESSION"} · ${chartSession.date || "n/a"}`, "caution") : "",
     pill("Current", latestPayload.current_price || trade?.price),
     trade?.timestamp ? textPill(`Trade ${new Date(trade.timestamp).toLocaleTimeString("en-US", { timeZone: "America/New_York" })} ET`) : "",
     textPill(levels.premarket_window || "Premarket 04:00-09:30 ET"),
@@ -669,11 +710,13 @@ async function loadInitialChart() {
 
   didInitialLoad = true;
 
-  statusEl.textContent = `Initial load: ${new Date(data.timestamp).toLocaleString("en-US", {
-    timeZone: "America/New_York",
-  })} ET`;
+  statusEl.textContent = data.chart_session?.is_historical
+    ? `Previous session: ${data.chart_session.date}`
+    : `Initial load: ${new Date(data.timestamp).toLocaleString("en-US", {
+        timeZone: "America/New_York",
+      })} ET`;
 
-  chart.timeScale().fitContent();
+  focusRecentCandles(data.candles);
 }
 
 function connectStream() {
