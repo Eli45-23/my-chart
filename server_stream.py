@@ -1835,33 +1835,42 @@ def evaluate_zone_reaction(zone, candles):
         return base
 
     last_touch_index, last_touch = touches[-1]
-    holding_candles = relevant[last_touch_index:]
     if kind == "demand":
-        closes_holding = sum(1 for candle in holding_candles if candle.get("close") >= high)
-        reaction_candle = next((
-            candle for candle in reversed(holding_candles)
+        stronger_reaction = next((
+            candle for index, candle in reversed(list(enumerate(relevant)))
+            if candle.get("close") > high and (
+                candle.get("low") < low
+                or (index > 0 and relevant[index - 1].get("close") <= high)
+            )
+        ), None)
+        reaction_candle = stronger_reaction or next((
+            candle for candle in reversed(relevant)
             if candle.get("low") <= high and candle.get("close") > high
         ), None)
+        reaction_index = relevant.index(reaction_candle) if reaction_candle else last_touch_index
+        holding_candles = relevant[reaction_index:]
+        closes_holding = sum(1 for candle in holding_candles if candle.get("close") >= high)
         edge_holding = bool(holding_candles) and all(candle.get("close") >= high for candle in holding_candles)
-        previous = relevant[relevant.index(reaction_candle) - 1] if reaction_candle and relevant.index(reaction_candle) > 0 else None
-        stronger = bool(reaction_candle and (
-            reaction_candle.get("low") < low
-            or (previous and previous.get("close") <= high)
-        ))
+        stronger = bool(stronger_reaction)
         status = "RECLAIM" if stronger else "HOLD"
         label = "DEMAND RECLAIM" if stronger else "DEMAND HOLD"
     else:
-        closes_holding = sum(1 for candle in holding_candles if candle.get("close") <= low)
-        reaction_candle = next((
-            candle for candle in reversed(holding_candles)
+        stronger_reaction = next((
+            candle for index, candle in reversed(list(enumerate(relevant)))
+            if candle.get("close") < low and (
+                candle.get("high") > high
+                or (index > 0 and relevant[index - 1].get("close") >= low)
+            )
+        ), None)
+        reaction_candle = stronger_reaction or next((
+            candle for candle in reversed(relevant)
             if candle.get("high") >= low and candle.get("close") < low
         ), None)
+        reaction_index = relevant.index(reaction_candle) if reaction_candle else last_touch_index
+        holding_candles = relevant[reaction_index:]
+        closes_holding = sum(1 for candle in holding_candles if candle.get("close") <= low)
         edge_holding = bool(holding_candles) and all(candle.get("close") <= low for candle in holding_candles)
-        previous = relevant[relevant.index(reaction_candle) - 1] if reaction_candle and relevant.index(reaction_candle) > 0 else None
-        stronger = bool(reaction_candle and (
-            reaction_candle.get("high") > high
-            or (previous and previous.get("close") >= low)
-        ))
+        stronger = bool(stronger_reaction)
         status = "REJECTION" if stronger else "HOLD"
         label = "SUPPLY REJECTION" if stronger else "SUPPLY HOLD"
 
