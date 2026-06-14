@@ -117,6 +117,9 @@ def get_headers():
 
 
 def fetch_bars(symbol, start, end, timeframe="1Min", limit=10000):
+    if end <= start:
+        return []
+
     url = f"{DATA_BASE_URL}/v2/stocks/{symbol}/bars"
     params = {
         "timeframe": timeframe,
