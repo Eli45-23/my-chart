@@ -34,30 +34,30 @@ const layerState = {
 };
 
 const COLORS = {
-  pmhPml: "#f6c85f",
-  previousHighLow: "#8ab4f8",
-  previousClose: "#b39ddb",
-  resistance: "#ff9800",
-  support: "#2196f3",
-  weakResistance: "#6d5a43",
-  weakSupport: "#40566b",
-  supply: "#ff4d6d",
-  demand: "#00c853",
-  weakSupply: "#6b414a",
-  weakDemand: "#356145",
-  trigger: "#ffd600",
-  invalidation: "#9e9e9e",
-  liquiditySweep: "#d500f9",
-  liquiditySweepAlt: "#7c4dff",
-  upsideCluster: "#ffb300",
-  downsideCluster: "#00e5ff",
-  supportWatch: "#64b5f6",
-  resistanceWatch: "#ffcc80",
-  confirmationWatch: "#d500f9",
-  confirmationConfirmed: "#ffd600",
-  confirmationInvalid: "#9e9e9e",
-  aiEntryBullish: "#58d68d",
-  aiEntryBearish: "#ff7675",
+  pmhPml: "#c6a45e",
+  previousHighLow: "#6f8eaf",
+  previousClose: "#857a9d",
+  resistance: "#b98662",
+  support: "#5e8eae",
+  weakResistance: "#695d50",
+  weakSupport: "#465866",
+  supply: "#b85f66",
+  demand: "#4e9b88",
+  weakSupply: "#67464b",
+  weakDemand: "#3d6157",
+  trigger: "#c3a35d",
+  invalidation: "#727d8b",
+  liquiditySweep: "#8a668f",
+  liquiditySweepAlt: "#656b98",
+  upsideCluster: "#ad8755",
+  downsideCluster: "#568d95",
+  supportWatch: "#668ca7",
+  resistanceWatch: "#a88a67",
+  confirmationWatch: "#88708e",
+  confirmationConfirmed: "#c3a35d",
+  confirmationInvalid: "#727d8b",
+  aiEntryBullish: "#62ad91",
+  aiEntryBearish: "#cf7373",
 };
 
 let activeTimeframe = "1Min";
@@ -74,23 +74,23 @@ const timeframeSeconds = {
 
 const chart = LightweightCharts.createChart(chartEl, {
   layout: {
-    background: { color: "#0b1017" },
-    textColor: "#aeb9c9",
+    background: { color: "#090e15" },
+    textColor: "#9ba8b8",
     attributionLogo: false,
   },
   grid: {
-    vertLines: { color: "#17202c" },
-    horzLines: { color: "#17202c" },
+    vertLines: { color: "#141c27" },
+    horzLines: { color: "#141c27" },
   },
   rightPriceScale: {
-    borderColor: "#263448",
+    borderColor: "#202c3b",
     scaleMargins: {
       top: 0.08,
       bottom: 0.08,
     },
   },
   timeScale: {
-    borderColor: "#263448",
+    borderColor: "#202c3b",
     timeVisible: true,
     secondsVisible: false,
     rightOffset: 8,
@@ -111,49 +111,49 @@ const chart = LightweightCharts.createChart(chartEl, {
   crosshair: {
     mode: LightweightCharts.CrosshairMode.Normal,
     vertLine: {
-      color: "#718096",
+      color: "#59677a",
       width: 1,
       style: LightweightCharts.LineStyle.Dashed,
-      labelBackgroundColor: "#27364a",
+      labelBackgroundColor: "#243143",
     },
     horzLine: {
-      color: "#718096",
+      color: "#59677a",
       width: 1,
       style: LightweightCharts.LineStyle.Dashed,
-      labelBackgroundColor: "#27364a",
+      labelBackgroundColor: "#243143",
     },
   },
 });
 
 const candleSeries = chart.addCandlestickSeries({
-  upColor: "#38ad9f",
-  downColor: "#df6262",
+  upColor: "#36a99a",
+  downColor: "#d85c5c",
   borderVisible: true,
-  borderUpColor: "#2d9187",
-  borderDownColor: "#bd5154",
+  borderUpColor: "#2b8d83",
+  borderDownColor: "#b84f52",
   wickVisible: true,
-  wickUpColor: "#62c0b5",
-  wickDownColor: "#e77a76",
-  priceLineColor: "#6eb9b0",
+  wickUpColor: "#64b9ae",
+  wickDownColor: "#df7470",
+  priceLineColor: "#67a99f",
   priceLineStyle: LightweightCharts.LineStyle.Dotted,
 });
 
 const vwapSeries = chart.addLineSeries({
-  color: "#fbc02d",
+  color: "#d2aa53",
   lineWidth: 2,
   priceLineVisible: false,
   title: "VWAP",
 });
 
 const ema9Series = chart.addLineSeries({
-  color: "#42a5f5",
+  color: "#5f91c1",
   lineWidth: 1,
   priceLineVisible: false,
   title: "EMA9",
 });
 
 const ema20Series = chart.addLineSeries({
-  color: "#ab47bc",
+  color: "#8a719f",
   lineWidth: 1,
   priceLineVisible: false,
   title: "EMA20",
@@ -317,15 +317,15 @@ function addZoneBand(label, zone, colors) {
   const weak = zone.zone_quality_grade === "WEAK";
   const style = weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed;
 
-  addLevel(`${label} High ${quality}`, high, colors.zone, LightweightCharts.LineStyle.Dotted, !weak);
-  addLevel(`${label} Low ${quality}`, low, colors.zone, LightweightCharts.LineStyle.Dotted, !weak);
+  addLevel(`${label} High ${quality}`, high, colors.zone, LightweightCharts.LineStyle.Dotted, false);
+  addLevel(`${label} Low ${quality}`, low, colors.zone, LightweightCharts.LineStyle.Dotted, false);
 
   if (zone.trigger !== null && zone.trigger !== undefined) {
-    addLevel(`${label} Trigger`, zone.trigger, weak ? colors.zone : COLORS.trigger, style, !weak);
+    addLevel(`${label} T`, zone.trigger, weak ? colors.zone : COLORS.trigger, style, !weak);
   }
 
   if (zone.invalidation !== null && zone.invalidation !== undefined) {
-    addLevel(`${label} Invalid`, zone.invalidation, COLORS.invalidation, LightweightCharts.LineStyle.Dotted, !weak);
+    addLevel(`${label} Invalid`, zone.invalidation, COLORS.invalidation, LightweightCharts.LineStyle.Dotted, false);
   }
 }
 
