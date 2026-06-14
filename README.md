@@ -1,6 +1,6 @@
-# AAPL Live Chart Test
+# Multi-Symbol Live Trading Review
 
-Standalone read-only AAPL live chart prototype.
+Standalone read-only live chart and AI-assisted review tool. AAPL remains the default symbol, with support for common stocks and ETFs such as SPY, QQQ, TSLA, NVDA, MSFT, and AMD.
 
 ## Purpose
 
@@ -58,6 +58,8 @@ http://127.0.0.1:8900/performance
 AI Trade Review is a strict, read-only intraday chart and options review assistant. It uses structured chart data, a compact multi-timeframe snapshot, existing backend grading and risk rules, and the doctrine in `docs/ai_trading_playbook.md`.
 
 From the AI panel inside `/performance`, you can review the current chart or ask questions about setups, confirmation, traps, risk/reward, market regime, SPY/QQQ confirmation, and the trading playbook. Chat responses answer the user's question first, then apply the answer to the current structured chart snapshot. The chart can display a possible-entry marker for a confirmed A or A+ setup only after every backend safety gate passes.
+
+The main chart and AI Trade Review panel include compact symbol selectors. The generic chart API is `/api/chart?symbol=AAPL&timeframe=5Min`; `/api/chart/aapl` remains available for compatibility. AAPL retains its websocket live stream, while other symbols use safe periodic chart refreshes. Related-market context changes by symbol, such as SMH for semiconductor names and QQQ/IWM/DIA for SPY.
 
 The compact AI snapshot also includes read-only Volume/RVOL confirmation context for intraday timeframes. Volume can adjust review confidence and warnings, but it is not drawn on the main chart, cannot create a setup, and cannot override marker gates.
 

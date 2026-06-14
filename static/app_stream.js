@@ -8,6 +8,10 @@ const chartEmptyEl = document.getElementById("chartEmpty");
 const tfButtons = document.querySelectorAll(".tf-btn");
 const toggleButtons = document.querySelectorAll(".toggle-btn[data-layer]");
 const cleanModeToggle = document.getElementById("cleanModeToggle");
+const symbolInput = document.getElementById("symbolInput");
+const loadSymbolButton = document.getElementById("loadSymbolButton");
+const chartTitleEl = document.getElementById("chartTitle");
+const chartSubtitleEl = document.getElementById("chartSubtitle");
 
 const CLEAN_MODE_STORAGE_KEY = "aaplChartCleanMode";
 let cleanMode = true;
@@ -61,6 +65,7 @@ const COLORS = {
 };
 
 let activeTimeframe = "1Min";
+let activeSymbol = "AAPL";
 let eventSource = null;
 let didInitialLoad = false;
 let latestPayload = null;
@@ -280,7 +285,7 @@ function renderAiEntryMarker(review) {
 
 async function refreshAiEntryMarker() {
   try {
-    const response = await fetch("/api/ai/latest-review");
+    const response = await fetch(`/api/ai/latest-review?symbol=${encodeURIComponent(activeSymbol)}`);
     if (!response.ok) {
       removeAiEntryMarker();
       return;
@@ -410,6 +415,29 @@ function updateChartEmptyState(candles) {
   chartEmptyEl.classList.toggle("visible", !Array.isArray(candles) || candles.length === 0);
 }
 
+function normalizeSymbolInput(value) {
+  const symbol = String(value || "").trim().toUpperCase();
+  return /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol) ? symbol : null;
+}
+
+function updateSymbolUi() {
+  symbolInput.value = activeSymbol;
+  chartTitleEl.textContent = `${activeSymbol} Live Trading Review`;
+  chartSubtitleEl.textContent = `${activeSymbol} · Read-only AI-assisted chart review · Eastern Time`;
+}
+
+function loadSelectedSymbol() {
+  const symbol = normalizeSymbolInput(symbolInput.value);
+  if (!symbol) {
+    errorEl.textContent = "Enter a valid stock or ETF symbol.";
+    symbolInput.focus();
+    return;
+  }
+  activeSymbol = symbol;
+  updateSymbolUi();
+  reloadForTimeframe();
+}
+
 function formatPrice(value) {
   return value === null || value === undefined ? "n/a" : Number(value).toFixed(2);
 }
@@ -514,8 +542,8 @@ function updateLegend(data) {
     textPill(`Regime ${regime.regime || "n/a"} · ${regime.regime_confidence || "LOW"}`, warningTone(regime.regime)),
     textPill(`Action ${regime.action_label || "WAIT_FOR_BREAKOUT"}`, warningTone(regime.action_label)),
     textPill(`Market ${latestPayload.professional_context?.market_confirmation?.market_confirmation || latestPayload.professional_context?.market_alignment || "n/a"}`, warningTone(latestPayload.professional_context?.market_confirmation?.market_confirmation)),
-    textPill(`SPY ${latestPayload.professional_context?.market_confirmation?.spy_bias || "n/a"} · QQQ ${latestPayload.professional_context?.market_confirmation?.qqq_bias || "n/a"}`),
-    textPill(`AAPL ${latestPayload.professional_context?.aapl?.trend?.label || "n/a"} · RVOL ${latestPayload.professional_context?.aapl?.rvol || "n/a"}x · ATR14 ${latestPayload.professional_context?.aapl?.atr14 || "n/a"}`),
+    textPill(`${latestPayload.related_market_symbols?.primary_market || "SPY"} ${latestPayload.professional_context?.market_confirmation?.primary_market_bias || latestPayload.professional_context?.market_confirmation?.spy_bias || "n/a"} · ${latestPayload.related_market_symbols?.secondary_market || "QQQ"} ${latestPayload.professional_context?.market_confirmation?.secondary_market_bias || latestPayload.professional_context?.market_confirmation?.qqq_bias || "n/a"}`),
+    textPill(`${activeSymbol} ${latestPayload.professional_context?.selected?.trend?.label || latestPayload.professional_context?.aapl?.trend?.label || "n/a"} · RVOL ${latestPayload.professional_context?.selected?.rvol ?? latestPayload.professional_context?.aapl?.rvol ?? "n/a"}x · ATR14 ${latestPayload.professional_context?.selected?.atr14 ?? latestPayload.professional_context?.aapl?.atr14 ?? "n/a"}`),
   ];
   const setupStatus = latestPayload.confirmation_setups?.status || "NO_SETUP";
   const setupItems = [
@@ -690,7 +718,7 @@ async function loadInitialChart() {
   errorEl.textContent = "";
   statusEl.textContent = "Loading chart...";
 
-  const res = await fetch(`/api/chart/aapl?timeframe=${encodeURIComponent(activeTimeframe)}`);
+  const res = await fetch(`/api/chart?symbol=${encodeURIComponent(activeSymbol)}&timeframe=${encodeURIComponent(activeTimeframe)}`);
   const data = await res.json();
 
   if (!res.ok || data.data_status !== "ok") {
@@ -724,7 +752,7 @@ function connectStream() {
     eventSource.close();
   }
 
-  eventSource = new EventSource(`/api/stream/aapl?timeframe=${encodeURIComponent(activeTimeframe)}`);
+  eventSource = new EventSource(`/api/stream?symbol=${encodeURIComponent(activeSymbol)}&timeframe=${encodeURIComponent(activeTimeframe)}`);
 
   eventSource.onmessage = (event) => {
     const data = JSON.parse(event.data);
@@ -790,6 +818,10 @@ tfButtons.forEach((btn) => {
   });
 });
 
+loadSymbolButton.addEventListener("click", loadSelectedSymbol);
+symbolInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") loadSelectedSymbol();
+});
 
 toggleButtons.forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -837,7 +869,7 @@ setInterval(refreshAiEntryMarker, 30000);
 // Live candle movement comes from the stream.
 setInterval(() => {
   if (didInitialLoad) {
-    fetch(`/api/chart/aapl?timeframe=${encodeURIComponent(activeTimeframe)}`)
+    fetch(`/api/chart?symbol=${encodeURIComponent(activeSymbol)}&timeframe=${encodeURIComponent(activeTimeframe)}`)
       .then(r => r.json())
       .then(data => {
         if (data.data_status === "ok") {
@@ -854,5 +886,6 @@ setInterval(() => {
 }, 30000);
 
 updateCleanModeControl();
+updateSymbolUi();
 reloadForTimeframe();
 refreshAiEntryMarker();

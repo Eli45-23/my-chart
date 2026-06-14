@@ -2,6 +2,7 @@ import json
 import math
 import os
 import queue
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ APP = Flask(__name__, static_folder="static")
 ET = ZoneInfo("America/New_York")
 
 SYMBOL = "AAPL"
+SYMBOL_PATTERN = re.compile(r"^[A-Z][A-Z0-9.-]{0,9}$")
 ALPACA_KEY = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
 DATA_BASE_URL = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets")
@@ -113,6 +115,41 @@ def get_headers():
     return {
         "APCA-API-KEY-ID": ALPACA_KEY,
         "APCA-API-SECRET-KEY": ALPACA_SECRET,
+    }
+
+
+def normalize_symbol(value, default=SYMBOL):
+    symbol = str(value or default).strip().upper()
+    if not SYMBOL_PATTERN.fullmatch(symbol):
+        raise ValueError("Invalid symbol. Use 1-10 letters, numbers, dots, or hyphens.")
+    return symbol
+
+
+def get_related_market_symbols(symbol):
+    symbol = normalize_symbol(symbol)
+    groups = {
+        "SPY": ("QQQ", "IWM", "DIA"),
+        "QQQ": ("SPY", "IWM", "DIA"),
+        "IWM": ("SPY", "QQQ", "DIA"),
+        "TSLA": ("SPY", "QQQ", "XLY"),
+    }
+    sectors = {
+        "XLK": {"AAPL", "MSFT", "META", "GOOGL", "GOOG", "AMZN"},
+        "SMH": {"NVDA", "AMD", "AVGO", "MU"},
+        "XLF": {"JPM", "BAC", "GS"},
+        "XLE": {"XOM", "CVX"},
+        "XLV": {"UNH", "JNJ", "PFE"},
+    }
+    related = list(groups.get(symbol, ("SPY", "QQQ", None)))
+    if symbol not in groups:
+        sector = next((etf for etf, members in sectors.items() if symbol in members), None)
+        related[2] = sector
+    related = [item for item in related if item and item != symbol]
+    return {
+        "primary_market": related[0] if related else None,
+        "secondary_market": related[1] if len(related) > 1 else None,
+        "sector_or_peer": related[2] if len(related) > 2 else None,
+        "related_symbols": related,
     }
 
 
@@ -2593,14 +2630,20 @@ def fetch_context_symbol(symbol, start, end, timeframe):
         }
 
 
-def build_professional_market_context(candles, indicators, current_price, timeframe, today_start, today_end):
+def build_professional_market_context(candles, indicators, current_price, timeframe, today_start, today_end, symbol=SYMBOL):
+    symbol = normalize_symbol(symbol)
     aapl_trend = confirmation_trend(current_price, indicators)
     aapl_regime = detect_chop_regime(candles, indicators, current_price=current_price)
     aapl_rvol = calc_rvol(candles, 20)
     atr14 = latest_indicator_value(indicators.get("atr14"))
 
-    spy = fetch_context_symbol("SPY", today_start, today_end, timeframe)
-    qqq = fetch_context_symbol("QQQ", today_start, today_end, timeframe)
+    related_market_symbols = get_related_market_symbols(symbol)
+    primary_symbol = related_market_symbols.get("primary_market") or "SPY"
+    secondary_symbol = related_market_symbols.get("secondary_market") or "QQQ"
+    sector_symbol = related_market_symbols.get("sector_or_peer")
+    spy = fetch_context_symbol(primary_symbol, today_start, today_end, timeframe)
+    qqq = fetch_context_symbol(secondary_symbol, today_start, today_end, timeframe)
+    sector_context = fetch_context_symbol(sector_symbol, today_start, today_end, timeframe) if sector_symbol else None
 
     spy_bias = spy.get("bias", "UNKNOWN")
     qqq_bias = qqq.get("bias", "UNKNOWN")
@@ -2654,21 +2697,21 @@ def build_professional_market_context(candles, indicators, current_price, timefr
         market_confirmation_score = 0
 
     market_reasons = [
-        f"SPY bias {spy_bias} score {spy_confirmation_score}",
-        f"QQQ bias {qqq_bias} score {qqq_confirmation_score}",
+        f"{primary_symbol} bias {spy_bias} score {spy_confirmation_score}",
+        f"{secondary_symbol} bias {qqq_bias} score {qqq_confirmation_score}",
     ]
     if relative_strength != "UNKNOWN":
-        market_reasons.append(f"AAPL relative strength {relative_strength}")
+        market_reasons.append(f"{symbol} relative strength {relative_strength}")
 
     market_warnings = []
     if market_alignment == "MIXED":
-        market_warnings.append("SPY and QQQ are not aligned.")
+        market_warnings.append(f"{primary_symbol} and {secondary_symbol} are not aligned.")
     if market_alignment == "UNKNOWN":
         market_warnings.append("Market confirmation is unavailable.")
     if spy.get("regime", {}).get("action_label") in {"NO_NEW_TRADES", "WAIT_FOR_BREAKOUT"}:
-        market_warnings.append("SPY regime is not confirming clean continuation.")
+        market_warnings.append(f"{primary_symbol} regime is not confirming clean continuation.")
     if qqq.get("regime", {}).get("action_label") in {"NO_NEW_TRADES", "WAIT_FOR_BREAKOUT"}:
-        market_warnings.append("QQQ regime is not confirming clean continuation.")
+        market_warnings.append(f"{secondary_symbol} regime is not confirming clean continuation.")
 
     market_confirmation = {
         "market_confirmation": market_alignment,
@@ -2677,6 +2720,12 @@ def build_professional_market_context(candles, indicators, current_price, timefr
         "qqq_confirmation_score": qqq_confirmation_score,
         "spy_bias": spy_bias,
         "qqq_bias": qqq_bias,
+        "primary_market_symbol": primary_symbol,
+        "secondary_market_symbol": secondary_symbol,
+        "sector_or_peer_symbol": sector_symbol,
+        "primary_market_bias": spy_bias,
+        "secondary_market_bias": qqq_bias,
+        "selected_symbol_relative_strength": relative_strength,
         "aapl_relative_strength": relative_strength,
         "aapl_vs_spy_change": aapl_vs_spy_change,
         "aapl_vs_qqq_change": aapl_vs_qqq_change,
@@ -2690,18 +2739,18 @@ def build_professional_market_context(candles, indicators, current_price, timefr
 
     if aapl_regime["regime"] == "CHOP":
         no_trade = True
-        warnings.append("AAPL chop regime detected.")
+        warnings.append(f"{symbol} chop regime detected.")
 
     if spy.get("regime", {}).get("regime") == "CHOP" and qqq.get("regime", {}).get("regime") == "CHOP":
         no_trade = True
-        warnings.append("SPY and QQQ both choppy.")
+        warnings.append(f"{primary_symbol} and {secondary_symbol} both choppy.")
 
     if market_alignment == "MIXED":
-        warnings.append("SPY and QQQ are mixed.")
+        warnings.append(f"{primary_symbol} and {secondary_symbol} are mixed.")
         aapl_regime["regime_confidence"] = "LOW"
         if aapl_regime.get("action_label") != "NO_NEW_TRADES":
             aapl_regime["action_label"] = "WAIT_FOR_BREAKOUT"
-        aapl_regime.setdefault("regime_warnings", []).append("SPY and QQQ context is mixed.")
+        aapl_regime.setdefault("regime_warnings", []).append(f"{primary_symbol} and {secondary_symbol} context is mixed.")
 
     if aapl_regime.get("action_label") == "NO_NEW_TRADES":
         no_trade = True
@@ -2710,10 +2759,10 @@ def build_professional_market_context(candles, indicators, current_price, timefr
         warnings.append("Market regime says wait for breakout.")
 
     if aapl_rvol is not None and aapl_rvol < 0.80:
-        warnings.append("AAPL relative volume is low.")
+        warnings.append(f"{symbol} relative volume is low.")
 
     if atr14 is not None and atr14 < 0.15:
-        warnings.append("AAPL ATR is low for active intraday movement.")
+        warnings.append(f"{symbol} ATR is low for active intraday movement.")
 
     if no_trade:
         professional_grade = "NO_TRADE"
@@ -2730,6 +2779,16 @@ def build_professional_market_context(candles, indicators, current_price, timefr
 
     return {
         "timeframe": timeframe,
+        "symbol": symbol,
+        "selected_symbol": symbol,
+        "related_market_symbols": related_market_symbols,
+        "selected": {
+            "trend": aapl_trend,
+            "regime": aapl_regime,
+            "rvol": aapl_rvol,
+            "atr14": round_price(atr14),
+            "relative_strength": relative_strength,
+        },
         "aapl": {
             "trend": aapl_trend,
             "regime": aapl_regime,
@@ -2739,6 +2798,9 @@ def build_professional_market_context(candles, indicators, current_price, timefr
         },
         "spy": spy,
         "qqq": qqq,
+        "primary_market_context": spy,
+        "secondary_market_context": qqq,
+        "sector_or_peer_context": sector_context,
         "market_alignment": market_alignment,
         "market_confirmation": market_confirmation,
         "market_confirmation_score": market_confirmation_score,
@@ -2945,7 +3007,7 @@ def strict_trade_quality_grade(setup, professional_context):
     if professional_context.get("no_trade"):
         warnings.append("Professional context says no trade.")
     if regime == "CHOP":
-        warnings.append("AAPL is in chop.")
+        warnings.append("Selected symbol is in chop.")
     if action_label == "NO_NEW_TRADES":
         warnings.append("Market regime says no new trades.")
     if action_label == "WAIT_FOR_BREAKOUT":
@@ -2953,9 +3015,9 @@ def strict_trade_quality_grade(setup, professional_context):
     if chop_score is not None and chop_score >= 70:
         warnings.append("Chop score too high.")
     if aapl_rvol is not None and aapl_rvol < 0.35:
-        warnings.append("AAPL relative volume extremely low.")
+        warnings.append("Selected-symbol relative volume extremely low.")
     elif aapl_rvol is not None and aapl_rvol < 0.7:
-        warnings.append("AAPL relative volume low.")
+        warnings.append("Selected-symbol relative volume low.")
     if atr14 is not None and atr14 < 0.12:
         warnings.append("ATR too low for clean intraday movement.")
     if market_opposes:
@@ -2965,7 +3027,7 @@ def strict_trade_quality_grade(setup, professional_context):
     if qqq_opposes:
         warnings.append("QQQ bias opposes setup.")
     if relative_strength_bad:
-        warnings.append("AAPL relative strength conflicts with setup direction.")
+        warnings.append("Selected-symbol relative strength conflicts with setup direction.")
     if rr_grade == "BAD":
         warnings.append("Risk/reward is BAD.")
     elif rr_grade == "WEAK":
@@ -2977,7 +3039,7 @@ def strict_trade_quality_grade(setup, professional_context):
     if not structure_confirmed:
         warnings.append("Structure not confirmed.")
     if not trend_confirmed:
-        warnings.append("AAPL trend filter not confirmed.")
+        warnings.append("Selected-symbol trend filter not confirmed.")
     if not volume_confirmed:
         warnings.append("Volume not confirmed.")
 
@@ -4445,11 +4507,11 @@ def unknown_daily_ai_context(error=None):
     }
 
 
-def build_daily_ai_context(current_price=None):
+def build_daily_ai_context(current_price=None, symbol=SYMBOL):
     try:
         now = datetime.now(ET)
         start = now - timedelta(days=180)
-        bars = fetch_bars(SYMBOL, start, now, timeframe="1Day", limit=250)
+        bars = fetch_bars(normalize_symbol(symbol), start, now, timeframe="1Day", limit=250)
         candles = normalize_candles(bars)
         if not candles:
             return unknown_daily_ai_context("no daily bars returned")
@@ -4537,8 +4599,8 @@ def build_daily_ai_context(current_price=None):
         return unknown_daily_ai_context(str(e))
 
 
-def chart_payload_for_ai(timeframe):
-    response = chart_data(timeframe_override=timeframe, include_logging=False)
+def chart_payload_for_ai(timeframe, symbol=SYMBOL):
+    response = chart_data(timeframe_override=timeframe, include_logging=False, symbol_override=symbol)
     if isinstance(response, tuple):
         response = response[0]
     return response.get_json()
@@ -4780,12 +4842,14 @@ def build_ai_option_chain_context(snapshot):
         return unavailable_option_chain_context(snapshot, f"Alpaca options data unavailable: {error}")
 
 
-def build_ai_chart_snapshot(requested_timeframe="5Min"):
+def build_ai_chart_snapshot(requested_timeframe="5Min", symbol=SYMBOL):
+    symbol = normalize_symbol(symbol)
     requested_timeframe = requested_timeframe if requested_timeframe in {*TIMEFRAMES, "Daily"} else "5Min"
     now = datetime.now(ET)
 
     with _ai_snapshot_lock:
-        cached = _ai_snapshot_cache.get(requested_timeframe) or {}
+        cache_key = (symbol, requested_timeframe)
+        cached = _ai_snapshot_cache.get(cache_key) or {}
         cached_at = cached.get("built_at")
         cached_snapshot = cached.get("snapshot")
         if cached_at and cached_snapshot and (now - cached_at).total_seconds() < AI_SNAPSHOT_CACHE_SECONDS:
@@ -4796,7 +4860,7 @@ def build_ai_chart_snapshot(requested_timeframe="5Min"):
             return snapshot
 
     intraday_payloads = {
-        timeframe: chart_payload_for_ai(timeframe)
+        timeframe: chart_payload_for_ai(timeframe, symbol)
         for timeframe in ["1Min", "5Min", "15Min"]
     }
     timeframe_contexts = {
@@ -4809,7 +4873,7 @@ def build_ai_chart_snapshot(requested_timeframe="5Min"):
             (payload.get("current_price") for payload in intraday_payloads.values() if payload.get("current_price") is not None),
             None,
         )
-    timeframe_contexts["Daily"] = build_daily_ai_context(current_price=current_price)
+    timeframe_contexts["Daily"] = build_daily_ai_context(current_price=current_price, symbol=symbol)
     if current_price is None:
         current_price = timeframe_contexts["Daily"].get("latest_close")
 
@@ -4818,7 +4882,9 @@ def build_ai_chart_snapshot(requested_timeframe="5Min"):
     regime = professional_context.get("aapl", {}).get("regime", {})
     market_confirmation = professional_context.get("market_confirmation") or {}
     snapshot = {
-        "symbol": SYMBOL,
+        "symbol": symbol,
+        "active_symbol": symbol,
+        "related_market_symbols": get_related_market_symbols(symbol),
         "timestamp": now.isoformat(),
         "current_price": round_price(current_price),
         "requested_timeframe": requested_timeframe,
@@ -4859,7 +4925,7 @@ def build_ai_chart_snapshot(requested_timeframe="5Min"):
     snapshot["ai_event"] = detect_ai_review_event(snapshot)
 
     with _ai_snapshot_lock:
-        _ai_snapshot_cache[requested_timeframe] = {
+        _ai_snapshot_cache[cache_key] = {
             "built_at": now,
             "snapshot": snapshot,
         }
@@ -5173,9 +5239,9 @@ def build_fallback_direct_answer(user_message, chart_summary, market_session_sta
             "The options-risk doctrine is grounded in summarized educational principles from the OCC Options "
             "Disclosure Document, FINRA options investor education, Cboe Options Institute, and SEC / Investor.gov. "
             "The playbook summarizes reliable concepts and does not copy or replace the full source documents. "
-            "For AAPL short-dated and 0DTE setups, that doctrine requires attention to theta decay, implied-volatility "
+            "For short-dated and 0DTE setups, that doctrine requires attention to theta decay, implied-volatility "
             "and volatility risk, bid-ask spread, liquidity and slippage, and the need for speed plus closed-candle "
-            "confirmation. A correct AAPL direction can still produce a poor option result if the move stalls or the "
+            "confirmation. A correct stock direction can still produce a poor option result if the move stalls or the "
             "contract is expensive or illiquid. Chop, weak risk/reward, missing invalidation, and chasing an extended "
             "entry are no-go conditions."
         )
@@ -5217,7 +5283,7 @@ def build_current_setup_application(
     return (
         f"Current chart decision: {decision}. Entry marker is {marker_status}. "
         f"Setup quality is {grade} with stage {stage}; risk/reward is {rr_grade}; "
-        f"market regime is {regime}; SPY/QQQ market confirmation is {market_confirmation}. "
+        f"market regime is {regime}; related-market confirmation is {market_confirmation}. "
         f"{volume_summary} {option_summary} {summary}"
     )
 
@@ -5320,7 +5386,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
         if risk_reward.get("rr_grade") not in {"GOOD", "OK"}:
             entry_conditions.append("Require GOOD or OK risk/reward.")
         if market_context.get("market_regime") == "CHOP":
-            entry_conditions.append("Wait for AAPL to leave CHOP.")
+            entry_conditions.append("Wait for the selected symbol to leave CHOP.")
         if market_context.get("action_label") == "NO_NEW_TRADES":
             entry_conditions.append("Wait until the action label allows new trades.")
         if not gates["checks"].get("market_not_directly_against"):
@@ -5411,7 +5477,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
         "manual_confirmation_checklist": [
             "Confirm the setup and direction manually.",
             "Confirm entry, invalidation, and realistic targets.",
-            "Confirm SPY/QQQ and market regime are not opposing the setup.",
+            "Confirm related-market context and market regime are not opposing the setup.",
             "Confirm price has not extended away from the suggested entry.",
         ],
         "read_only": True,
@@ -5523,6 +5589,7 @@ def call_openai_trade_review(snapshot, user_message=None):
         raise RuntimeError("OpenAI API key not configured.")
 
     model = os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
+    active_symbol = snapshot.get("symbol") or SYMBOL
     playbook = load_ai_trading_playbook()
     prompt_payload = {
         "user_message": user_message,
@@ -5530,7 +5597,7 @@ def call_openai_trade_review(snapshot, user_message=None):
         "hard_gates": evaluate_ai_entry_marker_gates(snapshot, snapshot.get("best_setup")),
     }
     system_prompt = (
-        "You are a strict professional intraday AAPL stock/options review assistant. "
+        f"You are a strict professional intraday {active_symbol} stock/options review assistant. "
         "Use the trading playbook as reliable educational doctrine, not as a trade-calling signal service. "
         "Do not invent rules or facts outside the structured backend snapshot. "
         "The deterministic chart engine, snapshot, and backend hard gates are the source of truth. "
@@ -5546,7 +5613,8 @@ def call_openai_trade_review(snapshot, user_message=None):
         "U.S. stock market session is closed because it is the weekend. When holiday_calendar_enabled is false on a "
         "weekday, mention that exchange holidays must be verified manually. "
         "When user_message is provided, answer the user's exact question first in direct_answer, then explain how "
-        "it applies to the current AAPL snapshot in application_to_current_setup. If asked about reliable sources, "
+        f"it applies to the current {active_symbol} snapshot in application_to_current_setup. If the user asks about "
+        f"a different symbol, clarify that the active chart symbol is {active_symbol}. If asked about reliable sources, "
         "explicitly mention the OCC Options Disclosure Document, FINRA options investor education, Cboe Options "
         "Institute, and SEC / Investor.gov, and explain that the playbook summarizes rather than copies them. "
         "You cannot override gates, place trades, tell the user to buy or sell now, claim certainty, "
@@ -5697,8 +5765,20 @@ def app_stream_js():
     return send_from_directory("static", "app_stream.js")
 
 
+@APP.route("/api/chart")
+def generic_chart_data():
+    raw_symbol = request.args.get("symbol", SYMBOL)
+    if not str(raw_symbol).strip():
+        return jsonify({"data_status": "error", "errors": ["Symbol is required."], "read_only": True}), 400
+    return chart_data(symbol_override=raw_symbol)
+
+
 @APP.route("/api/chart/aapl")
-def chart_data(timeframe_override=None, include_logging=True):
+def chart_data(timeframe_override=None, include_logging=True, symbol_override=SYMBOL):
+    try:
+        active_symbol = normalize_symbol(symbol_override)
+    except ValueError as error:
+        return jsonify({"data_status": "error", "errors": [str(error)], "read_only": True}), 400
     tf = timeframe_override or request.args.get("timeframe", "1Min")
     timeframe = tf if tf in TIMEFRAMES else "1Min"
 
@@ -5713,8 +5793,8 @@ def chart_data(timeframe_override=None, include_logging=True):
     prev_end = et_datetime(prev_day, 16, 5)
 
     try:
-        today_bars = fetch_bars(SYMBOL, today_start, today_end, timeframe=timeframe)
-        prev_bars = fetch_bars(SYMBOL, prev_start, prev_end, timeframe=timeframe)
+        today_bars = fetch_bars(active_symbol, today_start, today_end, timeframe=timeframe)
+        prev_bars = fetch_bars(active_symbol, prev_start, prev_end, timeframe=timeframe)
         chart_session_day = day
         chart_session_historical = False
         chart_session_reason = None
@@ -5729,8 +5809,8 @@ def chart_data(timeframe_override=None, include_logging=True):
                 prior_session_day = previous_weekday(chart_session_day)
                 prev_start = et_datetime(prior_session_day, 9, 30)
                 prev_end = et_datetime(prior_session_day, 16, 5)
-                today_bars = fetch_bars(SYMBOL, today_start, today_end, timeframe=timeframe)
-                prev_bars = fetch_bars(SYMBOL, prev_start, prev_end, timeframe=timeframe)
+                today_bars = fetch_bars(active_symbol, today_start, today_end, timeframe=timeframe)
+                prev_bars = fetch_bars(active_symbol, prev_start, prev_end, timeframe=timeframe)
 
         levels = calc_levels(today_bars, prev_bars)
         candles = normalize_candles(today_bars)
@@ -5738,10 +5818,10 @@ def chart_data(timeframe_override=None, include_logging=True):
         current_price = (
             candles[-1]["close"]
             if chart_session_historical and candles
-            else latest_trade["price"] if latest_trade else (candles[-1]["close"] if candles else None)
+            else latest_trade["price"] if active_symbol == SYMBOL and latest_trade else (candles[-1]["close"] if candles else None)
         )
 
-        if candles and live_candles.get(timeframe) and not chart_session_historical:
+        if candles and active_symbol == SYMBOL and live_candles.get(timeframe) and not chart_session_historical:
             if candles[-1]["time"] == live_candles[timeframe]["time"]:
                 candles[-1] = live_candles[timeframe]
             else:
@@ -5788,7 +5868,7 @@ def chart_data(timeframe_override=None, include_logging=True):
                 continue
 
             try:
-                htf_bars = fetch_bars(SYMBOL, today_start, today_end, timeframe=htf)
+                htf_bars = fetch_bars(active_symbol, today_start, today_end, timeframe=htf)
                 htf_candles = normalize_candles(htf_bars)
                 htf_regular = []
                 for hc in htf_candles:
@@ -5903,6 +5983,7 @@ def chart_data(timeframe_override=None, include_logging=True):
             timeframe,
             today_start,
             today_end,
+            symbol=active_symbol,
         )
 
         for setup in confirmation_setups.get("setups", []):
@@ -5935,7 +6016,7 @@ def chart_data(timeframe_override=None, include_logging=True):
 
         if include_logging and not chart_session_historical:
             logged_setups = log_confirmation_setups(
-                SYMBOL,
+                active_symbol,
                 timeframe,
                 confirmation_setups,
                 professional_context,
@@ -5943,7 +6024,7 @@ def chart_data(timeframe_override=None, include_logging=True):
             )
 
             setup_outcomes = evaluate_setup_outcomes(
-                SYMBOL,
+                active_symbol,
                 timeframe,
                 indicators_source,
                 confirmation_setups,
@@ -5953,7 +6034,10 @@ def chart_data(timeframe_override=None, include_logging=True):
             setup_outcomes = []
 
         return jsonify({
-            "symbol": SYMBOL,
+            "symbol": active_symbol,
+            "active_symbol": active_symbol,
+            "related_market_symbols": get_related_market_symbols(active_symbol),
+            "read_only": True,
             "timeframe": timeframe,
             "timestamp": now.isoformat(),
             "chart_session": {
@@ -5964,8 +6048,12 @@ def chart_data(timeframe_override=None, include_logging=True):
                 "read_only": True,
             },
             "current_price": current_price,
-            "latest_trade": latest_trade,
-            "stream_status": stream_status,
+            "latest_trade": latest_trade if active_symbol == SYMBOL else None,
+            "stream_status": stream_status if active_symbol == SYMBOL else {
+                "connected": False,
+                "error": "Historical polling mode for non-AAPL symbols.",
+                "last_message": None,
+            },
             "candles": candles,
             "levels": levels,
             "support_resistance": support_resistance,
@@ -5988,12 +6076,18 @@ def chart_data(timeframe_override=None, include_logging=True):
         })
     except Exception as e:
         return jsonify({
-            "symbol": SYMBOL,
+            "symbol": active_symbol,
+            "active_symbol": active_symbol,
+            "read_only": True,
             "timeframe": timeframe,
             "timestamp": now.isoformat(),
             "current_price": None,
-            "latest_trade": latest_trade,
-            "stream_status": stream_status,
+            "latest_trade": latest_trade if active_symbol == SYMBOL else None,
+            "stream_status": stream_status if active_symbol == SYMBOL else {
+                "connected": False,
+                "error": "Historical polling mode for non-AAPL symbols.",
+                "last_message": None,
+            },
             "candles": [],
             "levels": {},
             "support_resistance": {"support": [], "resistance": []},
@@ -6012,19 +6106,24 @@ def chart_data(timeframe_override=None, include_logging=True):
 @APP.route("/api/ai/snapshot")
 def ai_chart_snapshot():
     timeframe = request.args.get("timeframe", "5Min")
-    return jsonify(build_ai_chart_snapshot(timeframe))
+    symbol = request.args.get("symbol", SYMBOL)
+    return jsonify(build_ai_chart_snapshot(timeframe, symbol))
 
 
 @APP.route("/api/ai/latest-review")
 def latest_ai_review():
     timeframe = request.args.get("timeframe", "5Min")
+    symbol = request.args.get("symbol", SYMBOL)
     try:
-        build_ai_chart_snapshot(timeframe)
+        build_ai_chart_snapshot(timeframe, symbol)
     except Exception:
         pass
 
     with _latest_ai_review_lock:
         review = dict(LATEST_AI_REVIEW)
+    if review.get("symbol") != normalize_symbol(symbol):
+        review = empty_ai_review()
+        review["symbol"] = normalize_symbol(symbol)
     return jsonify(apply_ai_event_metadata(review))
 
 
@@ -6033,14 +6132,18 @@ def review_current_chart():
     global LATEST_AI_REVIEW
 
     timeframe = request.args.get("timeframe", "5Min")
+    symbol = request.args.get("symbol", SYMBOL)
     user_message = request.args.get("message")
     if request.method == "POST":
         payload = request.get_json(silent=True) or {}
         timeframe = payload.get("timeframe", timeframe)
+        symbol = payload.get("symbol", symbol)
         user_message = payload.get("user_message", payload.get("message", user_message))
 
-    snapshot = build_ai_chart_snapshot(timeframe)
+    snapshot = build_ai_chart_snapshot(timeframe, symbol)
     review = build_ai_trade_review(snapshot, user_message=user_message)
+    review["symbol"] = snapshot.get("symbol")
+    review["active_symbol"] = snapshot.get("symbol")
     review = apply_ai_event_metadata(review, acknowledge=True)
 
     with _latest_ai_review_lock:
@@ -6049,13 +6152,19 @@ def review_current_chart():
     return jsonify(review)
 
 
+@APP.route("/api/stream")
 @APP.route("/api/stream/aapl")
 def stream_chart():
+    try:
+        active_symbol = normalize_symbol(request.args.get("symbol", SYMBOL))
+    except ValueError as error:
+        return jsonify({"error": str(error), "read_only": True}), 400
     tf = request.args.get("timeframe", "1Min")
     timeframe = tf if tf in TIMEFRAMES else "1Min"
 
     q = queue.Queue(maxsize=100)
-    subscribers[timeframe].append(q)
+    if active_symbol == SYMBOL:
+        subscribers[timeframe].append(q)
 
     def event_stream():
         try:
@@ -6066,14 +6175,18 @@ def stream_chart():
                 except queue.Empty:
                     heartbeat = {
                         "type": "heartbeat",
-                        "symbol": SYMBOL,
+                        "symbol": active_symbol,
                         "timeframe": timeframe,
-                        "stream_status": stream_status,
-                        "latest_trade": latest_trade,
+                        "stream_status": stream_status if active_symbol == SYMBOL else {
+                            "connected": False,
+                            "error": "Historical polling mode; refreshes every 30 seconds.",
+                            "last_message": None,
+                        },
+                        "latest_trade": latest_trade if active_symbol == SYMBOL else None,
                     }
                     yield f"data: {json.dumps(heartbeat)}\n\n"
         finally:
-            if q in subscribers.get(timeframe, []):
+            if active_symbol == SYMBOL and q in subscribers.get(timeframe, []):
                 subscribers[timeframe].remove(q)
 
     return Response(event_stream(), mimetype="text/event-stream")
@@ -6090,7 +6203,7 @@ def performance_dashboard():
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>AAPL Professional Trading Dashboard</title>
+  <title>Professional Trading Dashboard</title>
   <style>
     :root {
       color-scheme: dark;
@@ -6338,7 +6451,7 @@ def performance_dashboard():
     }
     .ai-controls {
       display: grid;
-      grid-template-columns: minmax(120px, 160px) minmax(160px, auto) minmax(260px, 1fr) minmax(100px, auto);
+      grid-template-columns: 100px 120px minmax(160px, auto) minmax(260px, 1fr) minmax(100px, auto);
       gap: 10px;
       align-items: end;
     }
@@ -6417,7 +6530,7 @@ def performance_dashboard():
   </style>
 </head>
 <body>
-  <h1>AAPL Professional Trading Dashboard</h1>
+  <h1>Professional Trading Dashboard</h1>
   <div class="sub">
     Read-only setup intelligence, AI-assisted chart review, and measured performance context.
   </div>
@@ -6432,6 +6545,10 @@ def performance_dashboard():
     </div>
     <div id="aiRecommendation" class="ai-recommendation">No new AI review recommendation.</div>
     <div class="ai-controls">
+      <div class="control">
+        <label for="aiSymbol">Symbol</label>
+        <input id="aiSymbol" type="text" value="AAPL" maxlength="10" />
+      </div>
       <div class="control">
         <label for="aiTimeframe">Timeframe</label>
         <select id="aiTimeframe">
@@ -6731,6 +6848,7 @@ def performance_dashboard():
 
     async function requestAiReview(userMessage = null) {
       const timeframe = document.getElementById("aiTimeframe").value;
+      const symbol = document.getElementById("aiSymbol").value.trim().toUpperCase() || "AAPL";
       const status = document.getElementById("aiStatus");
       const reviewButton = document.getElementById("reviewCurrentChartButton");
       const askButton = document.getElementById("askAiButton");
@@ -6745,12 +6863,12 @@ def performance_dashboard():
           ? {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ timeframe, user_message: userMessage }),
+              body: JSON.stringify({ symbol, timeframe, user_message: userMessage }),
             }
           : { method: "GET" };
         const url = userMessage
           ? "/api/ai/review-current-chart"
-          : `/api/ai/review-current-chart?timeframe=${encodeURIComponent(timeframe)}`;
+          : `/api/ai/review-current-chart?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`;
         const response = await fetch(url, options);
         const review = await response.json();
         if (!response.ok) throw new Error(review.error || `Review failed (${response.status})`);
