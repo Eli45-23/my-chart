@@ -1,31 +1,104 @@
-# Multi-Symbol Live Trading Review
+# My Chart — Live Trading Review Dashboard
 
-Standalone read-only live chart and AI-assisted review tool. AAPL remains the default symbol, with support for common stocks and ETFs such as SPY, QQQ, TSLA, NVDA, MSFT, and AMD.
+A read-only live market chart and AI-assisted review dashboard for studying intraday price action, supply/demand zones, liquidity sweeps, and options trade context.
 
-## Purpose
+This project is designed for manual trading education, live chart review, and testing market-structure tools before moving anything into a larger scanner system.
 
-This project is for testing chart visuals and market-structure overlays before moving anything into Mr. Scanner.
+## What It Does
 
-It is **read-only**:
+My Chart displays live and recent market data with professional price-action overlays. It helps review possible bullish or bearish setups using candles, wicks, market structure, VWAP, moving averages, prior-session levels, supply/demand zones, liquidity sweeps, volume context, and AI-assisted commentary.
 
-- no order placement
-- no auto-trading
-- no Telegram alerts
-- no broker actions
+AAPL is the default symbol. The chart also supports common stocks and ETFs such as SPY, QQQ, TSLA, NVDA, MSFT, and AMD.
 
-## Main files
+## Safety
 
-- `server_stream.py` — Flask backend, Alpaca SIP live trade stream, chart API, indicators/zones
-- `static/index_stream.html` — chart page
-- `static/app_stream.js` — chart frontend and drawing logic
-- `.gitignore` — keeps secrets, virtualenv, and local backup files out of GitHub
+This project is read-only.
 
-## Run locally
+It does **not**:
+
+- place trades
+- send Alpaca orders
+- connect to Webull
+- automate entries or exits
+- send Telegram alerts
+- override manual user confirmation
+
+Every review should be treated as educational context only.
+
+## Main Features
+
+- Live Alpaca SIP trade stream
+- AAPL default chart
+- Multi-symbol chart support
+- 1Min, 5Min, and 15Min chart timeframes
+- Eastern Time chart formatting
+- Matching hover tooltip and bottom-axis time labels
+- VWAP
+- EMA 9 / EMA 20
+- PMH / PML
+- PDH / PDL / PDC
+- Support and resistance reliability scoring
+- Supply and demand zones
+- Zone Reaction Engine
+- Demand `HOLD`
+- Demand `RECLAIM`
+- Supply `HOLD`
+- Supply `REJECTION`
+- Failed zones
+- Liquidity sweep zones
+- Merged price clusters
+- 30-minute reaction zones
+- AI-assisted chart review
+- Read-only volume/RVOL confirmation context
+- Options contract-quality context when available
+- `/performance` dashboard
+
+## Main Files
+
+- `server_stream.py` — Flask backend, Alpaca stream, chart APIs, indicators, zones, AI review context
+- `static/index_stream.html` — main chart page
+- `static/app_stream.js` — chart frontend, drawing logic, time formatting, and UI behavior
+- `docs/ai_trading_playbook.md` — AI review doctrine and trading safety rules
+- `.gitignore` — keeps secrets, virtual environments, and local backup files out of GitHub
+
+## Requirements
+
+Python 3 is required.
+
+Install the core packages:
 
 ```bash
-cd ~/aapl_live_chart_test
-source .venv/bin/activate
-python server_stream.py
+python3 -m pip install flask python-dotenv websocket-client requests
+```
+
+Depending on your local environment, more packages may be needed if new features are added.
+
+## Environment Variables
+
+Configure Alpaca credentials before starting the server:
+
+```bash
+export ALPACA_API_KEY="your-key-here"
+export ALPACA_SECRET_KEY="your-secret-here"
+```
+
+OpenAI review is optional:
+
+```bash
+export OPENAI_API_KEY="your-key-here"
+export OPENAI_MODEL="model-name-optional"
+export ENABLE_AI_AUTO_REVIEW=false
+```
+
+Never commit real API keys or secrets.
+
+## Run Locally
+
+From the project folder:
+
+```bash
+cd "/Users/DayTrade/Documents/my chart"
+python3 server_stream.py
 ```
 
 Then open:
@@ -34,93 +107,100 @@ Then open:
 http://127.0.0.1:8900/
 ```
 
-The professional performance dashboard and AI Trade Review panel are available at:
+Performance dashboard:
 
 ```text
 http://127.0.0.1:8900/performance
 ```
 
-## Current chart layers
+## Testing Before Market Open
+
+Run these checks before live testing:
+
+```bash
+python3 -m compileall .
+python3 -m py_compile server_stream.py
+node --check static/app_stream.js
+git diff --check
+```
+
+Then start the server:
+
+```bash
+python3 server_stream.py
+```
+
+Check:
+
+- AAPL 1Min, 5Min, 15Min
+- SPY 1Min, 5Min, 15Min
+- symbol switching
+- timeframe switching
+- hover time and bottom-axis time
+- supply/demand zones
+- zone reactions
+- liquidity sweeps
+- AI latest review
+- browser console errors
+- server terminal errors
+
+## Chart Layers
+
+The chart currently includes:
 
 - live candles from Alpaca SIP stream
 - VWAP
 - EMA 9 / EMA 20
 - PMH / PML
 - PDH / PDL / PDC
-- support / resistance reliability scoring
-- supply / demand scoring
+- support/resistance scoring
+- supply/demand scoring
 - liquidity sweep zones
 - merged clusters
 - 30-minute reaction zones
+- multi-timeframe context
+
+## Zone Reaction Engine
+
+The Zone Reaction Engine provides read-only context around nearby supply and demand zones.
+
+Reaction labels include:
+
+- `HOLD`
+- `RECLAIM`
+- `REJECTION`
+- `FAILED`
+
+These labels are watch context only. They are not trade signals and cannot create an order.
+
+Strong reactions such as demand reclaims and supply rejections are preserved while later candles continue respecting the defended edge.
 
 ## AI Trade Review
 
-AI Trade Review is a strict, read-only intraday chart and options review assistant. It uses structured chart data, a compact multi-timeframe snapshot, existing backend grading and risk rules, and the doctrine in `docs/ai_trading_playbook.md`.
+AI Trade Review is a read-only review assistant. It uses structured chart data, market context, risk rules, and the trading playbook to explain possible setups.
 
-From the AI panel inside `/performance`, you can review the current chart or ask questions about setups, confirmation, traps, risk/reward, market regime, SPY/QQQ confirmation, and the trading playbook. Chat responses answer the user's question first, then apply the answer to the current structured chart snapshot. The chart can display a possible-entry marker for a confirmed A or A+ setup only after every backend safety gate passes.
+It can discuss:
 
-The main chart and AI Trade Review panel include compact symbol selectors. The generic chart API is `/api/chart?symbol=AAPL&timeframe=5Min`; `/api/chart/aapl` remains available for compatibility. AAPL retains its websocket live stream, while other symbols use safe periodic chart refreshes. Related-market context changes by symbol, such as SMH for semiconductor names and QQQ/IWM/DIA for SPY.
+- trend
+- momentum
+- candles
+- wicks
+- liquidity sweeps
+- traps
+- support and resistance
+- supply and demand
+- SPY/QQQ confirmation
+- options contract quality
+- risk/reward
+- no-trade conditions
 
-Supply and demand zones include a read-only Zone Reaction Engine. It labels nearby demand holds/reclaims, supply holds/rejections, and failed zones as early watch context. Zone reactions feed chart and AI review context but cannot create an entry marker or override confirmation and risk gates.
+The chart may display a possible-entry marker only when strict backend gates pass, including confirmed setup grade, acceptable risk/reward, market confirmation, non-chop regime, and valid entry/invalidation levels.
 
-The compact AI snapshot also includes read-only Volume/RVOL confirmation context for intraday timeframes. Volume can adjust review confidence and warnings, but it is not drawn on the main chart, cannot create a setup, and cannot override marker gates.
+AI Trade Review cannot place trades, send broker orders, connect to Webull, or override backend safety gates.
 
-AI market-open answers use a deterministic America/New_York session-status object from the backend. Weekend and supported session-hour status are calculated directly; exchange holidays are not yet implemented and should be verified manually.
+## Trading Playbook
 
-When available, AI Trade Review also uses a compact Alpaca `option_chain_context` containing only selected near-ATM call/put contract-quality data. It can warn about spreads, liquidity, theta, implied volatility, and contract quality. If Alpaca options data is unavailable or stale, the AI safely falls back to chart-only review. No option order or purchase is placed or automated.
-
-AI Trade Review:
-
-- does not place trades
-- does not send Alpaca orders
-- does not connect to Webull
-- does not automate entries or exits
-- does not replace manual user confirmation
-- cannot override backend marker gates
-
-### Enable OpenAI Reviews
-
-OpenAI-powered reviews are optional. Set environment variables before starting the server:
-
-```bash
-export OPENAI_API_KEY="your-key-here"
-export OPENAI_MODEL="model-name-optional"
-python server_stream.py
-```
-
-Never commit a real API key. When `OPENAI_API_KEY` is not configured, AI Trade Review continues working with deterministic chart logic and returns a warning that OpenAI is not configured.
-
-Automatic OpenAI review is disabled by default:
-
-```bash
-export ENABLE_AI_AUTO_REVIEW=false
-```
-
-The chart may recommend requesting a review after meaningful setup or market events, but manual Review/Ask actions remain the primary trigger. The chart page only reads the latest review and does not call OpenAI.
-
-### AI Entry Marker
-
-The read-only AI entry marker is allowed only when strict backend gates pass, including:
-
-- setup is confirmed and graded A or A+
-- risk/reward is `OK` or `GOOD`
-- setup is not failed or invalidated
-- regime is not `CHOP`
-- action label is not `NO_NEW_TRADES`
-- market confirmation is not directly against the setup
-- suggested entry and invalidation are valid
-- current price is not too extended from the suggested entry
-
-Mixed, opposing, no-trade, choppy, weak-risk/reward, or extended conditions block the marker. An allowed marker includes:
-
-```text
-ENTER TRADE SETUP
-POSSIBLE ENTRY — NOT AN ORDER
-```
-
-### Trading Playbook
-
-`docs/ai_trading_playbook.md` defines the AI assistant's professional trading doctrine, options-risk knowledge, setup standards, marker rules, decision language, and safety boundaries. Its educational principles are grounded in summarized material from the OCC Options Disclosure Document, FINRA options investor education, Cboe Options Institute, and SEC Investor.gov. It does not copy or replace those source documents.
+`docs/ai_trading_playbook.md` defines the AI assistant's trading doctrine, options-risk knowledge, setup standards, marker rules, decision language, and safety boundaries.
 
 The playbook guides interpretation only. Backend chart logic, structured snapshot data, and hard gates remain the source of truth.
 
@@ -128,6 +208,17 @@ Every review follows this safety doctrine:
 
 > Read-only review. Not financial advice. Not an order. Confirm manually. Do not chase.
 
-## Notes
+## Current Limitations
 
-Reaction zones are short-term watch areas only. They are meant to show where price is reacting in the most recent 30 minutes. They are not trade signals.
+- Live trade aggregation can only be fully tested during an active market session.
+- Exchange-holiday logic is not fully implemented and should be verified manually.
+- No order execution is implemented.
+- No Webull connection is implemented.
+- No automated test suite or dependency manifest is currently included.
+- Some macOS Python environments may show a LibreSSL / urllib3 warning even when HTTPS requests still work.
+
+## Important Note
+
+This project is for educational chart review only.
+
+Read-only review. Not financial advice. Not an order. Confirm manually. Do not chase.
