@@ -76,6 +76,7 @@ const chart = LightweightCharts.createChart(chartEl, {
   layout: {
     background: { color: "#0f1115" },
     textColor: "#d6d9df",
+    attributionLogo: false,
   },
   grid: {
     vertLines: { color: "#1d2430" },
