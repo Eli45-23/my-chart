@@ -49,6 +49,9 @@ const COLORS = {
   demand: "#4e9b88",
   weakSupply: "#67464b",
   weakDemand: "#3d6157",
+  demandReaction: "#5d9f8f",
+  supplyReaction: "#ad686d",
+  failedZone: "#59626e",
   trigger: "#c3a35d",
   invalidation: "#727d8b",
   liquiditySweep: "#8a668f",
@@ -195,19 +198,14 @@ function chartSupplyDemandZones(zones) {
   const available = zones || [];
 
   if (cleanMode) {
-    const strong = available.filter(zone => ["A", "B"].includes(zone.zone_quality_grade));
-    if (strong.length) return strong;
-
     const currentPrice = latestPayload?.current_price || latestPayload?.latest_trade?.price;
-    const cZones = available
-      .filter(zone => zone.zone_quality_grade === "C")
-      .sort((a, b) => {
-        if (currentPrice === null || currentPrice === undefined) return 0;
-        const aMid = (Number(a.low) + Number(a.high)) / 2;
-        const bMid = (Number(b.low) + Number(b.high)) / 2;
-        return Math.abs(aMid - currentPrice) - Math.abs(bMid - currentPrice);
-      });
-    return cZones.length ? [cZones[0]] : [];
+    const nearDistance = currentPrice ? Math.max(0.5, Number(currentPrice) * 0.003) : Infinity;
+    return available.filter(zone => {
+      if (!["HOLD", "RECLAIM", "REJECTION"].includes(zone.reaction_status)) return false;
+      if (currentPrice === null || currentPrice === undefined) return true;
+      const mid = (Number(zone.low) + Number(zone.high)) / 2;
+      return Math.abs(mid - Number(currentPrice)) <= nearDistance;
+    });
   }
 
   return available.filter(zone => !(isWeakZone(zone) && !layerState.weakZones));
@@ -319,14 +317,21 @@ function addZoneBand(label, zone, colors) {
   if (low === null || low === undefined || high === null || high === undefined) return;
 
   const quality = zone.label || "Zone";
-  const weak = zone.zone_quality_grade === "WEAK";
+  const failed = zone.reaction_status === "FAILED";
+  const weak = zone.zone_quality_grade === "WEAK" || failed;
+  const zoneColor = failed ? COLORS.failedZone : colors.zone;
   const style = weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed;
 
-  addLevel(`${label} High ${quality}`, high, colors.zone, LightweightCharts.LineStyle.Dotted, false);
-  addLevel(`${label} Low ${quality}`, low, colors.zone, LightweightCharts.LineStyle.Dotted, false);
+  addLevel(`${label} High ${quality}`, high, zoneColor, LightweightCharts.LineStyle.Dotted, false);
+  addLevel(`${label} Low ${quality}`, low, zoneColor, LightweightCharts.LineStyle.Dotted, false);
+
+  if (zone.reaction_label && !failed) {
+    const reactionColor = zone.type === "demand" ? COLORS.demandReaction : COLORS.supplyReaction;
+    addLevel(zone.reaction_label, zone.defended_edge, reactionColor, LightweightCharts.LineStyle.Dashed, true);
+  }
 
   if (zone.trigger !== null && zone.trigger !== undefined) {
-    addLevel(`${label} T`, zone.trigger, weak ? colors.zone : COLORS.trigger, style, !weak);
+    addLevel(`${label} T`, zone.trigger, weak ? zoneColor : COLORS.trigger, style, !weak && !zone.reaction_label);
   }
 
   if (zone.invalidation !== null && zone.invalidation !== undefined) {
@@ -526,8 +531,8 @@ function updateLegend(data) {
     pill("VWAP", latestVWAP), pill("EMA9", latestEMA9), cleanMode ? "" : pill("EMA20", latestEMA20),
     cleanMode ? "" : textPill(`Support ${(latestPayload.support_resistance?.support || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""}`).join(", ") || "none"}`),
     cleanMode ? "" : textPill(`Resistance ${(latestPayload.support_resistance?.resistance || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""}`).join(", ") || "none"}`),
-    textPill(`Demand ${demandZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.zone_quality_grade || ""}`).join(", ") || "none"}`),
-    textPill(`Supply ${supplyZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.zone_quality_grade || ""}`).join(", ") || "none"}`),
+    textPill(`Demand ${demandZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.reaction_label || z.zone_quality_grade || ""}`).join(", ") || "none"}`),
+    textPill(`Supply ${supplyZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.reaction_label || z.zone_quality_grade || ""}`).join(", ") || "none"}`),
   ];
   const researchItems = [
     cleanMode ? "" : textPill(`Reaction Zones ${[

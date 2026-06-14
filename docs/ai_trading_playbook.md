@@ -188,6 +188,15 @@ A good chart setup and a good option contract are separate requirements. AAPL ca
 - Option-chain data is confirmation and risk context, never a standalone entry signal.
 - Option-chain data cannot create marker eligibility or override deterministic backend chart gates.
 
+## Zone Reaction Context
+
+Demand holds/reclaims and supply holds/rejections are early reversal-watch context only. They describe whether buyers or sellers appear to defend a zone edge, but they are not standalone entries.
+
+- A demand hold or reclaim can strengthen a bullish watch only when confirmation, structure, risk/reward, regime, and related-market context also agree.
+- A supply hold or rejection can strengthen a bearish watch only when the same confirmation requirements agree.
+- A failed zone is invalidated context and should not be trusted as support or resistance.
+- Zone reactions must never create PLAN_READY or an entry marker by themselves.
+
 ## 4. Price Action and Trend Principles
 
 ### Trend Continuation

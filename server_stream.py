@@ -1190,7 +1190,7 @@ def filter_reliable_supply_demand(
                 level_clusters=level_clusters,
                 atr14=atr14,
             )
-            if z["worth_showing"]:
+            if z["worth_showing"] or z.get("reaction_status") == "FAILED":
                 result[side].append(z)
 
     result["demand"] = sorted(result["demand"], key=lambda z: -z.get("zone_quality_score", 0))[:4]
@@ -1198,6 +1198,7 @@ def filter_reliable_supply_demand(
 
     result["meta"]["zone_quality_rule"] = "Weighted freshness, impulse, reaction, retests, volume, width, and confluence"
     result["meta"]["zone_quality_grades"] = {"A": "80-100", "B": "65-79", "C": "50-64", "WEAK": "below 50"}
+    result["meta"]["reaction_rule"] = "Read-only HOLD, RECLAIM, REJECTION, and FAILED context from zone touches and closes"
     result["meta"]["read_only"] = True
     return result
 
@@ -1779,6 +1780,117 @@ def zone_broken_through(zone, candles):
     return False
 
 
+def evaluate_zone_reaction(zone, candles):
+    zone = zone or {}
+    candles = candles or []
+    kind = zone.get("type")
+    low = zone.get("low")
+    high = zone.get("high")
+    zone_time = zone.get("time")
+    defended_edge = high if kind == "demand" else low if kind == "supply" else None
+    failure_edge = low if kind == "demand" else high if kind == "supply" else None
+    base = {
+        "reaction_status": "NONE",
+        "reaction_label": None,
+        "defended_edge": round_price(defended_edge),
+        "failure_edge": round_price(failure_edge),
+        "closes_holding_edge": 0,
+        "touches_count": 0,
+        "last_reaction_time": None,
+        "reaction_confidence": 0,
+        "reaction_warnings": [],
+        "read_only": True,
+    }
+    if kind not in {"demand", "supply"} or low is None or high is None:
+        base["reaction_warnings"] = ["Zone edges are unavailable."]
+        return base
+
+    relevant = [c for c in candles if not zone_time or c.get("time", 0) > zone_time]
+    if not relevant:
+        return base
+
+    touches = [
+        (index, candle) for index, candle in enumerate(relevant)
+        if ranges_overlap(low, high, candle.get("low"), candle.get("high"))
+    ]
+    base["touches_count"] = len(touches)
+
+    failed = next((
+        candle for candle in reversed(relevant)
+        if (kind == "demand" and candle.get("close") < low)
+        or (kind == "supply" and candle.get("close") > high)
+    ), None)
+    if failed:
+        base.update({
+            "reaction_status": "FAILED",
+            "reaction_label": f"{kind.upper()} FAILED",
+            "last_reaction_time": failed.get("time"),
+            "reaction_confidence": 100,
+            "reaction_warnings": [f"{kind.title()} failed after a close beyond the failure edge."],
+        })
+        return base
+
+    if not touches:
+        base["reaction_status"] = "ACTIVE"
+        return base
+
+    last_touch_index, last_touch = touches[-1]
+    holding_candles = relevant[last_touch_index:]
+    if kind == "demand":
+        closes_holding = sum(1 for candle in holding_candles if candle.get("close") >= high)
+        reaction_candle = next((
+            candle for candle in reversed(holding_candles)
+            if candle.get("low") <= high and candle.get("close") > high
+        ), None)
+        edge_holding = bool(holding_candles) and all(candle.get("close") >= high for candle in holding_candles)
+        previous = relevant[relevant.index(reaction_candle) - 1] if reaction_candle and relevant.index(reaction_candle) > 0 else None
+        stronger = bool(reaction_candle and (
+            reaction_candle.get("low") < low
+            or (previous and previous.get("close") <= high)
+        ))
+        status = "RECLAIM" if stronger else "HOLD"
+        label = "DEMAND RECLAIM" if stronger else "DEMAND HOLD"
+    else:
+        closes_holding = sum(1 for candle in holding_candles if candle.get("close") <= low)
+        reaction_candle = next((
+            candle for candle in reversed(holding_candles)
+            if candle.get("high") >= low and candle.get("close") < low
+        ), None)
+        edge_holding = bool(holding_candles) and all(candle.get("close") <= low for candle in holding_candles)
+        previous = relevant[relevant.index(reaction_candle) - 1] if reaction_candle and relevant.index(reaction_candle) > 0 else None
+        stronger = bool(reaction_candle and (
+            reaction_candle.get("high") > high
+            or (previous and previous.get("close") >= low)
+        ))
+        status = "REJECTION" if stronger else "HOLD"
+        label = "SUPPLY REJECTION" if stronger else "SUPPLY HOLD"
+
+    if not reaction_candle or not edge_holding:
+        base.update({
+            "reaction_status": "ACTIVE",
+            "last_reaction_time": last_touch.get("time"),
+            "reaction_confidence": min(45, 20 + len(touches) * 5),
+            "reaction_warnings": ["Zone was touched but the defended edge is not currently holding on closes."],
+        })
+        return base
+
+    confidence = (68 if stronger else 48) + min(18, closes_holding * 7) + min(10, len(touches) * 3)
+    warnings = []
+    if closes_holding < 2:
+        warnings.append("Reaction is early; wait for additional closes holding the defended edge.")
+    if len(touches) >= 3:
+        warnings.append("Multiple retests may weaken the zone.")
+    base.update({
+        "reaction_status": status,
+        "reaction_label": label,
+        "closes_holding_edge": closes_holding,
+        "last_reaction_time": reaction_candle.get("time"),
+        "reaction_confidence": min(95, confidence),
+        "reaction_warnings": warnings,
+    })
+    return base
+
+
 def zone_caused_follow_through(zone, candles, current_price=None):
     low = zone.get("low")
     high = zone.get("high")
@@ -1889,6 +2001,7 @@ def enhance_supply_demand_zones(supply_demand, candles, current_price=None, time
                 "display_score": score,
                 "worth_showing": score >= 60 and not broken,
             })
+            zone.update(evaluate_zone_reaction(zone, candles))
 
             result[side].append(zone)
 
@@ -3781,7 +3894,7 @@ def build_confirmation_level_candidates(levels=None, support_resistance=None, su
 
     candidates = []
 
-    def add(side, price, name, kind, low=None, high=None, confidence=None, quality_score=None, quality_grade=None, quality_reasons=None):
+    def add(side, price, name, kind, low=None, high=None, confidence=None, quality_score=None, quality_grade=None, quality_reasons=None, reaction=None):
         if price is None:
             return
         candidates.append({
@@ -3795,6 +3908,7 @@ def build_confirmation_level_candidates(levels=None, support_resistance=None, su
             "quality_score": quality_score,
             "quality_grade": quality_grade,
             "quality_reasons": quality_reasons or [],
+            "zone_reaction": reaction,
         })
 
     add("upside", levels.get("pmh"), "PMH", "premarket_high")
@@ -3818,12 +3932,22 @@ def build_confirmation_level_candidates(levels=None, support_resistance=None, su
         add(
             "upside", z.get("high"), f"Supply {idx + 1}", "supply", low=z.get("low"), high=z.get("high"), confidence=z.get("label"),
             quality_score=z.get("zone_quality_score"), quality_grade=z.get("zone_quality_grade"), quality_reasons=z.get("zone_quality_reasons"),
+            reaction={key: z.get(key) for key in [
+                "reaction_status", "reaction_label", "defended_edge", "failure_edge",
+                "closes_holding_edge", "touches_count", "last_reaction_time",
+                "reaction_confidence", "reaction_warnings", "read_only",
+            ]},
         )
 
     for idx, z in enumerate(supply_demand.get("demand", []) or []):
         add(
             "downside", z.get("low"), f"Demand {idx + 1}", "demand", low=z.get("low"), high=z.get("high"), confidence=z.get("label"),
             quality_score=z.get("zone_quality_score"), quality_grade=z.get("zone_quality_grade"), quality_reasons=z.get("zone_quality_reasons"),
+            reaction={key: z.get(key) for key in [
+                "reaction_status", "reaction_label", "defended_edge", "failure_edge",
+                "closes_holding_edge", "touches_count", "last_reaction_time",
+                "reaction_confidence", "reaction_warnings", "read_only",
+            ]},
         )
 
     return candidates
@@ -4023,6 +4147,7 @@ def detect_confirmation_setups(candles, current_price=None, levels=None, support
                 "zone_quality_score": level.get("quality_score") if level.get("kind") in {"supply", "demand"} else None,
                 "zone_quality_grade": level.get("quality_grade") if level.get("kind") in {"supply", "demand"} else None,
                 "zone_quality_reasons": level.get("quality_reasons", []) if level.get("kind") in {"supply", "demand"} else [],
+                "zone_reaction": level.get("zone_reaction") if level.get("kind") in {"supply", "demand"} else None,
                 "interaction": interaction,
                 "trigger": trigger,
                 "invalidation": invalidation,
@@ -4419,6 +4544,26 @@ def compact_intraday_ai_context(payload):
     )
     support_resistance = payload.get("support_resistance") or {}
     supply_demand = payload.get("supply_demand") or {}
+    zone_reactions = [
+        {
+            "type": zone.get("type"),
+            "low": zone.get("low"),
+            "high": zone.get("high"),
+            "reaction_status": zone.get("reaction_status"),
+            "reaction_label": zone.get("reaction_label"),
+            "defended_edge": zone.get("defended_edge"),
+            "failure_edge": zone.get("failure_edge"),
+            "closes_holding_edge": zone.get("closes_holding_edge"),
+            "touches_count": zone.get("touches_count"),
+            "last_reaction_time": zone.get("last_reaction_time"),
+            "reaction_confidence": zone.get("reaction_confidence"),
+            "reaction_warnings": zone.get("reaction_warnings") or [],
+            "read_only": True,
+        }
+        for side in ["demand", "supply"]
+        for zone in supply_demand.get(side, []) or []
+        if zone.get("reaction_status") in {"HOLD", "RECLAIM", "REJECTION", "FAILED"}
+    ][:8]
 
     return {
         "timeframe": timeframe,
@@ -4442,6 +4587,7 @@ def compact_intraday_ai_context(payload):
         "setup_status": best_setup.get("status") if best_setup else confirmation_setups.get("status"),
         "risk_reward": compact_risk_reward(best_setup.get("risk_reward")) if best_setup else None,
         "volume_context": build_ai_volume_context(candles, best_setup),
+        "zone_reactions": zone_reactions,
         "warnings": list(dict.fromkeys(
             (confirmation_setups.get("quality_warnings") or [])
             + (professional_context.get("warnings") or [])
@@ -5310,6 +5456,8 @@ def build_fallback_ai_review(snapshot, user_message=None):
     stage = setup.get("confirmation_stage")
     direction = setup.get("direction") if setup.get("direction") in {"bullish", "bearish"} else "neutral"
     volume_context = select_review_volume_context(snapshot, setup)
+    requested_context = (snapshot.get("timeframes") or {}).get(snapshot.get("requested_timeframe")) or {}
+    zone_reactions = requested_context.get("zone_reactions") or []
     market_session_status = snapshot.get("market_session_status") or build_market_session_status()
     option_chain_context = snapshot.get("option_chain_context") or unavailable_option_chain_context(
         snapshot,
@@ -5319,6 +5467,11 @@ def build_fallback_ai_review(snapshot, user_message=None):
     warnings = list(gates.get("warnings") or [])
     warnings.extend(risk_reward.get("rr_warnings") or [])
     warnings.extend(market_context.get("warnings") or [])
+    warnings.extend(
+        warning
+        for reaction in zone_reactions
+        for warning in reaction.get("reaction_warnings") or []
+    )
     if volume_context.get("low_volume_warning"):
         warnings.append("Low RVOL: setup may lack participation; short-dated options are more vulnerable if price stalls.")
     elif volume_context.get("volume_strength") == "weak":
@@ -5420,6 +5573,7 @@ def build_fallback_ai_review(snapshot, user_message=None):
         "volume_context": volume_context,
         "market_session_status": market_session_status,
         "option_chain_context": option_chain_context,
+        "zone_reactions": zone_reactions,
         "user_message": user_message,
         "read_only": True,
     }
@@ -5608,6 +5762,9 @@ def call_openai_trade_review(snapshot, user_message=None):
         "Use option_chain_context to separate chart setup quality from option contract quality. Warn about wide "
         "spreads, weak liquidity, low volume/open interest, fast theta decay, and high implied volatility when "
         "present. Option data is risk context only: it cannot create marker eligibility or override backend gates. "
+        "Use each timeframe's zone_reactions as early reversal-watch context only. HOLD, RECLAIM, and REJECTION "
+        "must never create an entry or PLAN_READY decision by themselves; require confirmation, risk/reward, "
+        "related-market context, and backend gates. Treat FAILED zones as invalidated context. "
         "If the user asks whether the market is open, answer using market_session_status only and never guess from "
         "general knowledge. If it says CLOSED, say the market is closed. If it is a weekend, clearly say the regular "
         "U.S. stock market session is closed because it is the weekend. When holiday_calendar_enabled is false on a "

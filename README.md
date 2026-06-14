@@ -61,6 +61,8 @@ From the AI panel inside `/performance`, you can review the current chart or ask
 
 The main chart and AI Trade Review panel include compact symbol selectors. The generic chart API is `/api/chart?symbol=AAPL&timeframe=5Min`; `/api/chart/aapl` remains available for compatibility. AAPL retains its websocket live stream, while other symbols use safe periodic chart refreshes. Related-market context changes by symbol, such as SMH for semiconductor names and QQQ/IWM/DIA for SPY.
 
+Supply and demand zones include a read-only Zone Reaction Engine. It labels nearby demand holds/reclaims, supply holds/rejections, and failed zones as early watch context. Zone reactions feed chart and AI review context but cannot create an entry marker or override confirmation and risk gates.
+
 The compact AI snapshot also includes read-only Volume/RVOL confirmation context for intraday timeframes. Volume can adjust review confidence and warnings, but it is not drawn on the main chart, cannot create a setup, and cannot override marker gates.
 
 AI market-open answers use a deterministic America/New_York session-status object from the backend. Weekend and supported session-hour status are calculated directly; exchange holidays are not yet implemented and should be verified manually.
