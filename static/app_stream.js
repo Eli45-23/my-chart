@@ -80,6 +80,34 @@ const timeframeSeconds = {
   "15Min": 900,
 };
 
+const chartTimeEtFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const chartDateEtFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  month: "short",
+  day: "numeric",
+});
+
+function chartTimeToDate(time) {
+  if (typeof time === "number") return new Date(time * 1000);
+  if (typeof time === "string") return new Date(time);
+  if (time && typeof time === "object" && time.year && time.month && time.day) {
+    return new Date(Date.UTC(time.year, time.month - 1, time.day, 12));
+  }
+  return new Date(NaN);
+}
+
+function formatChartTimeET(time, showDate = false) {
+  const date = chartTimeToDate(time);
+  if (Number.isNaN(date.getTime())) return "";
+  return showDate ? chartDateEtFormatter.format(date) : chartTimeEtFormatter.format(date);
+}
+
 const chart = LightweightCharts.createChart(chartEl, {
   layout: {
     background: { color: "#090e15" },
@@ -104,17 +132,10 @@ const chart = LightweightCharts.createChart(chartEl, {
     rightOffset: 8,
     barSpacing: 8,
     minBarSpacing: 3,
+    tickMarkFormatter: (time, tickMarkType) => formatChartTimeET(time, tickMarkType <= 2),
   },
   localization: {
-    timeFormatter: (time) => {
-      const date = new Date(time * 1000);
-      return date.toLocaleTimeString("en-US", {
-        timeZone: "America/New_York",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: false,
-      });
-    },
+    timeFormatter: (time) => formatChartTimeET(time),
   },
   crosshair: {
     mode: LightweightCharts.CrosshairMode.Normal,
