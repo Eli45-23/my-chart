@@ -185,6 +185,19 @@ The deterministic Chart Line Audit registers existing plotted indicators, levels
 
 Clean Mode 2.0 uses audit metadata to show only nearby, actionable context. VWAP, EMA9, EMA20, current price, nearby major session levels, active zone reactions, and confirmed setup triggers remain visible. Failed, weak, distant, low-priority, invalid, and duplicate nearby research lines are hidden. Full Mode retains broader deterministic context with weak and failed items visually muted.
 
+## Candle Accuracy And Data Integrity
+
+The Candle Accuracy and Data Integrity Engine preserves raw Alpaca bars for audit while allowing only validated candles to feed the chart and deterministic analysis engines.
+
+- `1Min` candles are structurally and contextually validated before display or calculation use.
+- `5Min` and `15Min` candles are rebuilt from validated real `1Min` bars.
+- Suspicious and rejected candles are excluded from indicators, session levels, zones, setups, risk/reward, AI snapshots, logging, and marker inputs.
+- Incomplete rebuilt buckets are retained only when at least 60% of the real provider minutes in that bucket remain valid. No missing minute is fabricated.
+- Chart responses expose `data_quality_status`, `candle_accuracy_mode`, filter counts, and warnings.
+- Use `/api/debug/candles?symbol=AAPL&timeframe=5Min` to inspect bounded raw, validated, rejected, and cross-timeframe comparison data.
+
+`CLEAN` means no candle correction or filtering was required. `WARNING` means a problem was safely filtered or a candle was rebuilt. `DEGRADED` means too little reliable data remains for normal analysis.
+
 ## AI Trade Review
 
 AI Trade Review is a read-only review assistant. It uses structured chart data, market context, risk rules, and the trading playbook to explain possible setups.

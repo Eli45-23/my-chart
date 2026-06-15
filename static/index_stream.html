@@ -104,6 +104,16 @@
       border-color: rgba(201, 166, 93, .38);
       color: var(--warn);
     }
+    .status-pill.data-warning {
+      border-color: rgba(201, 166, 93, .38);
+      color: var(--warn);
+      background: rgba(86, 68, 30, .18);
+    }
+    .status-pill.data-degraded {
+      border-color: rgba(215, 121, 121, .38);
+      color: var(--bad);
+      background: rgba(82, 38, 42, .2);
+    }
     .chart-shell { position: relative; background: #090e15; }
     #chart {
       width: 100%;
@@ -321,6 +331,7 @@
         <span class="status status-pill" id="status">Loading chart</span>
         <span class="status status-pill" id="countdown">Next 1m candle: --:--</span>
         <span class="status status-pill" id="streamStatus">Stream connecting</span>
+        <span class="status status-pill" id="dataQualityStatus">Data quality checking</span>
         <span class="status status-pill">Read-only</span>
       </div>
     </div>
@@ -366,6 +377,6 @@
   </div>
   <div class="error" id="error"></div>
 
-  <script src="/app_stream.js?v=stream38"></script>
+  <script src="/app_stream.js?v=stream39"></script>
 </body>
 </html>

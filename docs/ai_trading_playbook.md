@@ -304,6 +304,16 @@ Broader-market confirmation materially affects AAPL.
 
 The AI must defer to backend market-confirmation fields and warnings.
 
+## Candle Data Integrity
+
+Validated candle data is the only permitted source for chart bias, levels, setups, grading, risk/reward, and possible-entry marker review. Raw provider candles are retained for audit only.
+
+- Never use a `SUSPICIOUS` or `REJECTED` candle to support a trade thesis.
+- Treat `REBUILT_FROM_1MIN` candles as the preferred higher-timeframe source when they contain only validated real minute bars.
+- When `data_quality_status` is `WARNING` or `DEGRADED`, disclose the candle-data warning and reduce confidence.
+- If reliable candle data is insufficient, prefer `WAIT`; do not infer or fabricate missing price action.
+- Candle validation is deterministic backend logic and cannot be overridden by AI commentary.
+
 ## 9. Risk/Reward and Invalidation
 
 Every possible setup requires:

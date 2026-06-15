@@ -36,6 +36,9 @@ TIMEFRAMES = {
 subscribers = {tf: [] for tf in TIMEFRAMES}
 live_candles = {tf: None for tf in TIMEFRAMES}
 latest_trade = None
+latest_candle_audits = {}
+recent_validated_candles = {}
+candle_audit_lock = threading.Lock()
 stream_status = {
     "connected": False,
     "last_message": None,
@@ -659,14 +662,18 @@ def detect_supply_demand_zones(candles, current_price=None, timeframe="1Min"):
         }
     }
 
-def calc_levels(today_bars, prev_bars):
-    day = today_et()
+def calc_levels(today_bars, prev_bars, session_day=None):
+    day = session_day or today_et()
     premarket_start = et_datetime(day, 4, 0)
     market_open = et_datetime(day, 9, 30)
 
     pre_bars = []
     for b in today_bars:
-        t = datetime.fromisoformat(b["t"].replace("Z", "+00:00")).astimezone(ET)
+        t = (
+            datetime.fromtimestamp(b["time"], tz=timezone.utc).astimezone(ET)
+            if b.get("time") is not None
+            else datetime.fromisoformat(b["t"].replace("Z", "+00:00")).astimezone(ET)
+        )
         if premarket_start <= t < market_open:
             pre_bars.append(b)
 
@@ -676,16 +683,20 @@ def calc_levels(today_bars, prev_bars):
     prev_close = et_datetime(prev_day, 16, 0)
 
     for b in prev_bars:
-        t = datetime.fromisoformat(b["t"].replace("Z", "+00:00")).astimezone(ET)
+        t = (
+            datetime.fromtimestamp(b["time"], tz=timezone.utc).astimezone(ET)
+            if b.get("time") is not None
+            else datetime.fromisoformat(b["t"].replace("Z", "+00:00")).astimezone(ET)
+        )
         if prev_open <= t <= prev_close:
             regular_prev.append(b)
 
     return {
-        "pmh": max((b["h"] for b in pre_bars), default=None),
-        "pml": min((b["l"] for b in pre_bars), default=None),
-        "pdh": max((b["h"] for b in regular_prev), default=None),
-        "pdl": min((b["l"] for b in regular_prev), default=None),
-        "pdc": regular_prev[-1]["c"] if regular_prev else None,
+        "pmh": max((b.get("high", b.get("h")) for b in pre_bars), default=None),
+        "pml": min((b.get("low", b.get("l")) for b in pre_bars), default=None),
+        "pdh": max((b.get("high", b.get("h")) for b in regular_prev), default=None),
+        "pdl": min((b.get("low", b.get("l")) for b in regular_prev), default=None),
+        "pdc": regular_prev[-1].get("close", regular_prev[-1].get("c")) if regular_prev else None,
         "premarket_window": "04:00 ET <= candle time < 09:30 ET",
     }
 
@@ -1548,6 +1559,294 @@ def normalize_candles(bars):
     return candles
 
 
+def _median(values):
+    values = sorted(float(value) for value in values if isinstance(value, (int, float)) and math.isfinite(value))
+    if not values:
+        return None
+    middle = len(values) // 2
+    return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+
+
+def raw_candles_from_bars(bars, symbol, timeframe, provider="alpaca"):
+    raw_candles = []
+    for bar in bars or []:
+        raw_candles.append({
+            "raw_open": bar.get("o"),
+            "raw_high": bar.get("h"),
+            "raw_low": bar.get("l"),
+            "raw_close": bar.get("c"),
+            "raw_volume": bar.get("v"),
+            "raw_timestamp": bar.get("t"),
+            "data_provider": provider,
+            "raw_symbol": symbol,
+            "raw_timeframe": timeframe,
+            "read_only": True,
+        })
+    return raw_candles
+
+
+def _audited_candle(raw):
+    timestamp = raw.get("raw_timestamp")
+    try:
+        parsed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00")).astimezone(timezone.utc)
+        epoch = int(parsed.timestamp())
+        et_time = parsed.astimezone(ET).strftime("%H:%M")
+    except Exception:
+        parsed = None
+        epoch = None
+        et_time = None
+    raw_values = {
+        "open": raw.get("raw_open"),
+        "high": raw.get("raw_high"),
+        "low": raw.get("raw_low"),
+        "close": raw.get("raw_close"),
+        "volume": raw.get("raw_volume"),
+        "timestamp": timestamp,
+    }
+    return {
+        "timestamp": timestamp,
+        "time": epoch,
+        "et_time": et_time,
+        "open": raw.get("raw_open"),
+        "high": raw.get("raw_high"),
+        "low": raw.get("raw_low"),
+        "close": raw.get("raw_close"),
+        "volume": raw.get("raw_volume"),
+        "validation_status": "VALID",
+        "validation_reasons": [],
+        "excluded_from_calculations": False,
+        "excluded_from_display": False,
+        "raw_values": raw_values,
+        "corrected_values": None,
+        "data_provider": raw.get("data_provider"),
+        "raw_symbol": raw.get("raw_symbol"),
+        "raw_timeframe": raw.get("raw_timeframe"),
+        "read_only": True,
+    }
+
+
+def validate_raw_candles(raw_candles):
+    audited = [_audited_candle(raw) for raw in raw_candles or []]
+    seen = {}
+    numeric_fields = ("open", "high", "low", "close")
+
+    for candle in audited:
+        reasons = candle["validation_reasons"]
+        timestamp = candle.get("timestamp")
+        if candle.get("time") is None:
+            reasons.append("invalid or impossible timestamp")
+        for field in numeric_fields:
+            value = candle.get(field)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                reasons.append(f"missing or non-finite {field}")
+            elif value <= 0:
+                reasons.append(f"zero or negative {field}")
+        volume = candle.get("volume")
+        if not isinstance(volume, (int, float)) or not math.isfinite(volume):
+            reasons.append("volume missing or non-finite")
+        elif volume < 0:
+            reasons.append("negative volume")
+        if not reasons:
+            if candle["high"] < candle["low"]:
+                reasons.append("high below low")
+            if not candle["low"] <= candle["open"] <= candle["high"]:
+                reasons.append("open outside high/low")
+            if not candle["low"] <= candle["close"] <= candle["high"]:
+                reasons.append("close outside high/low")
+        values = tuple(candle.get(field) for field in (*numeric_fields, "volume"))
+        if timestamp in seen and seen[timestamp]["values"] != values:
+            reasons.append("duplicate timestamp with conflicting OHLCV")
+            first = seen[timestamp]["candle"]
+            if "duplicate timestamp with conflicting OHLCV" not in first["validation_reasons"]:
+                first["validation_reasons"].append("duplicate timestamp with conflicting OHLCV")
+            first["validation_status"] = "REJECTED"
+        else:
+            seen[timestamp] = {"values": values, "candle": candle}
+        if reasons:
+            candle["validation_status"] = "REJECTED"
+
+    structurally_valid = [candle for candle in audited if candle["validation_status"] == "VALID"]
+    for index, candle in enumerate(structurally_valid):
+        prior = structurally_valid[max(0, index - 20):index]
+        following = structurally_valid[index + 1:index + 3]
+        if len(prior) < 8:
+            continue
+        median_range = _median([item["high"] - item["low"] for item in prior])
+        median_volume = _median([item.get("volume") or 0 for item in prior])
+        median_wick = _median([
+            max(item["high"] - max(item["open"], item["close"]), min(item["open"], item["close"]) - item["low"])
+            for item in prior
+        ])
+        if not median_range or median_range <= 0:
+            continue
+        candle_range = candle["high"] - candle["low"]
+        wick = max(
+            candle["high"] - max(candle["open"], candle["close"]),
+            min(candle["open"], candle["close"]) - candle["low"],
+        )
+        previous = prior[-1]
+        next_candle = following[0] if following else None
+        close_move = abs(candle["close"] - previous["close"]) / previous["close"] if previous["close"] else 0
+        snapback = (
+            abs(next_candle["close"] - previous["close"]) / max(abs(candle["close"] - previous["close"]), 0.0001)
+            if next_candle else 0
+        )
+        neighbor_high = max(item["high"] for item in prior[-3:] + following[:1])
+        neighbor_low = min(item["low"] for item in prior[-3:] + following[:1])
+        neighbor_deviation = max(
+            max(0, candle["high"] - neighbor_high),
+            max(0, neighbor_low - candle["low"]),
+        ) / previous["close"]
+        extreme_range = candle_range > median_range * 6
+        low_confirmation_volume = median_volume is not None and (candle.get("volume") or 0) < median_volume * 2
+        immediate_snapback = next_candle is not None and snapback >= 0.7
+        confirmed_snapback = immediate_snapback and close_move >= 0.005
+        extreme_wick = bool(median_wick and median_wick > 0 and wick > median_wick * 5)
+        outside_neighbors = neighbor_deviation > 0.0075
+
+        evidence = []
+        if extreme_range:
+            evidence.append(f"range {candle_range / median_range:.1f}x recent median")
+        if low_confirmation_volume and extreme_range:
+            evidence.append("extreme move lacks confirming volume")
+        if confirmed_snapback:
+            evidence.append("next candle immediately snaps back")
+        if outside_neighbors:
+            evidence.append("price extends far outside neighboring candles")
+        if extreme_wick and immediate_snapback:
+            evidence.append("extreme wick has no follow-through")
+
+        if extreme_range and low_confirmation_volume and (confirmed_snapback or outside_neighbors):
+            candle["validation_status"] = "REJECTED"
+            candle["validation_reasons"].extend(evidence)
+        elif len(evidence) >= 3:
+            candle["validation_status"] = "SUSPICIOUS"
+            candle["validation_reasons"].extend(evidence)
+
+    for candle in audited:
+        excluded = candle["validation_status"] in {"SUSPICIOUS", "REJECTED"}
+        candle["excluded_from_calculations"] = excluded
+        candle["excluded_from_display"] = excluded
+    validated = [candle for candle in audited if not candle["excluded_from_calculations"]]
+    return audited, validated
+
+
+def aggregate_validated_candles(validated_1min, timeframe, audited_1min=None):
+    seconds = TIMEFRAMES.get(timeframe)
+    if timeframe == "1Min" or not seconds:
+        return list(validated_1min or [])
+    buckets = {}
+    available_counts = {}
+    for candle in audited_1min or validated_1min or []:
+        if candle.get("time") is not None:
+            bucket = candle["time"] - candle["time"] % seconds
+            available_counts[bucket] = available_counts.get(bucket, 0) + 1
+    for candle in validated_1min or []:
+        if candle.get("time") is None:
+            continue
+        buckets.setdefault(candle["time"] - candle["time"] % seconds, []).append(candle)
+    rebuilt = []
+    for bucket, source in sorted(buckets.items()):
+        source = sorted(source, key=lambda item: item["time"])
+        expected = max(1, available_counts.get(bucket, len(source)))
+        coverage = len(source) / expected
+        if coverage < 0.60:
+            continue
+        values = {
+            "open": source[0]["open"],
+            "high": max(item["high"] for item in source),
+            "low": min(item["low"] for item in source),
+            "close": source[-1]["close"],
+            "volume": sum(item.get("volume") or 0 for item in source),
+        }
+        corrected = len(source) < expected or any(item.get("validation_status") == "CORRECTED" for item in source)
+        rebuilt.append({
+            "timestamp": datetime.fromtimestamp(bucket, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            "time": bucket,
+            "et_time": datetime.fromtimestamp(bucket, tz=timezone.utc).astimezone(ET).strftime("%H:%M"),
+            **values,
+            "validation_status": "CORRECTED" if corrected else "VALID",
+            "validation_reasons": [f"rebuilt from {len(source)}/{expected} validated 1Min candles"] if corrected else ["rebuilt from validated 1Min candles"],
+            "excluded_from_calculations": False,
+            "excluded_from_display": False,
+            "raw_values": None,
+            "corrected_values": values,
+            "source_candle_count": len(source),
+            "expected_source_candle_count": expected,
+            "source_coverage": round(coverage, 2),
+            "data_provider": "rebuilt_from_validated_1min",
+            "raw_symbol": source[0].get("raw_symbol"),
+            "raw_timeframe": timeframe,
+            "read_only": True,
+        })
+    return rebuilt
+
+
+def compare_provider_aggregates(provider_bars, rebuilt, symbol, timeframe):
+    raw = raw_candles_from_bars(provider_bars, symbol, timeframe)
+    provider = {_audited_candle(item).get("time"): _audited_candle(item) for item in raw}
+    comparisons = []
+    for candle in rebuilt or []:
+        other = provider.get(candle.get("time"))
+        if not other:
+            continue
+        price_match = all(abs(float(candle[key]) - float(other[key])) <= 0.01 for key in ("open", "high", "low", "close"))
+        provider_volume = other.get("volume") or 0
+        volume_delta = abs((candle.get("volume") or 0) - provider_volume)
+        volume_match = provider_volume == 0 or volume_delta / provider_volume <= 0.02
+        if not price_match or not volume_match:
+            comparisons.append({
+                "time": candle.get("time"),
+                "price_match": price_match,
+                "volume_match": volume_match,
+                "rebuilt": {key: candle.get(key) for key in ("open", "high", "low", "close", "volume")},
+                "provider": {key: other.get(key) for key in ("open", "high", "low", "close", "volume")},
+            })
+    return comparisons
+
+
+def build_candle_integrity_bundle(bars_1min, symbol, timeframe, provider_bars=None):
+    raw_1min = raw_candles_from_bars(bars_1min, symbol, "1Min")
+    raw_provider = raw_candles_from_bars(provider_bars or bars_1min, symbol, timeframe)
+    audited, validated_1min = validate_raw_candles(raw_1min)
+    candles = aggregate_validated_candles(validated_1min, timeframe, audited)
+    comparisons = compare_provider_aggregates(provider_bars or [], candles, symbol, timeframe) if timeframe != "1Min" else []
+    suspicious = [item for item in audited if item["validation_status"] == "SUSPICIOUS"]
+    rejected = [item for item in audited if item["validation_status"] == "REJECTED"]
+    corrected = [item for item in candles if item["validation_status"] == "CORRECTED"]
+    warnings = []
+    if suspicious:
+        warnings.append(f"{len(suspicious)} suspicious candle(s) filtered.")
+    if rejected:
+        warnings.append(f"{len(rejected)} rejected candle(s) filtered.")
+    if corrected:
+        warnings.append(f"{len(corrected)} {timeframe} candle(s) rebuilt with incomplete validated-minute coverage.")
+    if comparisons:
+        warnings.append(f"{len(comparisons)} provider {timeframe} candle(s) differ from validated 1Min rebuild.")
+    minimum = 8 if timeframe == "1Min" else 3
+    status = "DEGRADED" if len(candles) < minimum else ("WARNING" if warnings else "CLEAN")
+    return {
+        "data_quality_status": status,
+        "candle_accuracy_mode": "VALIDATED" if timeframe == "1Min" else "REBUILT_FROM_1MIN",
+        "raw_candle_count": len(raw_provider),
+        "validated_candle_count": len(candles),
+        "suspicious_candle_count": len(suspicious),
+        "rejected_candle_count": len(rejected),
+        "corrected_candle_count": len(corrected),
+        "candle_data_warnings": warnings,
+        "bad_print_filter_enabled": True,
+        "raw_candles": raw_provider,
+        "raw_1min_candles": raw_1min,
+        "audited_1min_candles": audited,
+        "validated_1min_candles": validated_1min,
+        "validated_candles": candles,
+        "suspicious_candles": suspicious,
+        "rejected_candles": rejected,
+        "cross_timeframe_validation": comparisons,
+        "read_only": True,
+    }
+
+
 def bucket_time(timestamp_utc, tf_seconds):
     epoch = int(timestamp_utc.timestamp())
     return epoch - (epoch % tf_seconds)
@@ -1587,6 +1886,27 @@ def parse_alpaca_timestamp(ts):
 
     return datetime.fromisoformat(value).astimezone(timezone.utc)
 
+
+def live_candle_is_suspicious(candle, symbol=SYMBOL):
+    with candle_audit_lock:
+        context = list(recent_validated_candles.get(symbol) or [])
+    if len(context) < 8:
+        return False, []
+    median_range = _median([item["high"] - item["low"] for item in context[-20:]])
+    median_volume = _median([item.get("volume") or 0 for item in context[-20:]])
+    if not median_range or median_range <= 0:
+        return False, []
+    candle_range = candle["high"] - candle["low"]
+    extreme_range = candle_range > median_range * 6
+    low_confirmation_volume = median_volume is not None and (candle.get("volume") or 0) < median_volume * 2
+    reasons = []
+    if extreme_range:
+        reasons.append(f"live range {candle_range / median_range:.1f}x recent validated median")
+    if extreme_range and low_confirmation_volume:
+        reasons.append("live extreme move lacks confirming volume")
+    return bool(extreme_range and low_confirmation_volume), reasons
+
+
 def update_live_candles(price, size, trade_time_utc):
     global latest_trade
 
@@ -1596,6 +1916,8 @@ def update_live_candles(price, size, trade_time_utc):
         "timestamp": trade_time_utc.isoformat().replace("+00:00", "Z"),
     }
 
+    suppress_live_events = False
+    suppression_reasons = []
     for tf, seconds in TIMEFRAMES.items():
         bucket = bucket_time(trade_time_utc, seconds)
         candle = live_candles.get(tf)
@@ -1616,14 +1938,19 @@ def update_live_candles(price, size, trade_time_utc):
             candle["volume"] = (candle.get("volume") or 0) + (size or 0)
 
         live_candles[tf] = candle
+        if tf == "1Min":
+            suppress_live_events, suppression_reasons = live_candle_is_suspicious(candle)
 
         event = {
-            "type": "live_candle",
+            "type": "data_quality_warning" if suppress_live_events else "live_candle",
             "symbol": SYMBOL,
             "timeframe": tf,
-            "candle": candle,
+            "candle": None if suppress_live_events else candle,
             "latest_trade": latest_trade,
             "stream_status": stream_status,
+            "data_quality_status": "WARNING" if suppress_live_events else "CLEAN",
+            "candle_data_warnings": suppression_reasons,
+            "bad_print_filter_enabled": True,
         }
 
         for q in list(subscribers.get(tf, [])):
@@ -4803,6 +5130,12 @@ def compact_intraday_ai_context(payload):
     return {
         "timeframe": timeframe,
         "data_status": payload.get("data_status"),
+        "data_quality_status": payload.get("data_quality_status", "DEGRADED"),
+        "candle_accuracy_mode": payload.get("candle_accuracy_mode", "RAW_PROVIDER"),
+        "suspicious_candle_count": payload.get("suspicious_candle_count", 0),
+        "rejected_candle_count": payload.get("rejected_candle_count", 0),
+        "corrected_candle_count": payload.get("corrected_candle_count", 0),
+        "candle_data_warnings": payload.get("candle_data_warnings") or [],
         "latest_close": round_price(latest_close),
         "latest_candle_time": candles[-1].get("time") if candles else None,
         "latest_candle_direction": candle_direction(candles[-1] if candles else None),
@@ -4844,6 +5177,7 @@ def compact_intraday_ai_context(payload):
         "warnings": list(dict.fromkeys(
             (confirmation_setups.get("quality_warnings") or [])
             + (professional_context.get("warnings") or [])
+            + (payload.get("candle_data_warnings") or [])
         ))[:12],
         "checks": best_setup.get("quality_checks") if best_setup else None,
         "nearest_support": nearest_price_item(support_resistance.get("support"), current_price, ["price"]),
@@ -5288,6 +5622,12 @@ def build_ai_chart_snapshot(requested_timeframe="5Min", symbol=SYMBOL):
         "current_price": round_price(current_price),
         "requested_timeframe": requested_timeframe,
         "market_session_status": build_market_session_status(now),
+        "data_quality_status": requested_payload.get("data_quality_status", "DEGRADED"),
+        "candle_accuracy_mode": requested_payload.get("candle_accuracy_mode", "RAW_PROVIDER"),
+        "suspicious_candle_count": requested_payload.get("suspicious_candle_count", 0),
+        "rejected_candle_count": requested_payload.get("rejected_candle_count", 0),
+        "corrected_candle_count": requested_payload.get("corrected_candle_count", 0),
+        "candle_data_warnings": requested_payload.get("candle_data_warnings") or [],
         "timeframes": timeframe_contexts,
         "market_context": {
             "market_regime": regime.get("regime"),
@@ -5720,6 +6060,11 @@ def build_fallback_ai_review(snapshot, user_message=None):
     warnings = list(gates.get("warnings") or [])
     warnings.extend(risk_reward.get("rr_warnings") or [])
     warnings.extend(market_context.get("warnings") or [])
+    if snapshot.get("data_quality_status") != "CLEAN":
+        warnings.append(
+            f"Candle data quality is {snapshot.get('data_quality_status', 'DEGRADED')}; rejected candles were excluded from analysis."
+        )
+        warnings.extend(snapshot.get("candle_data_warnings") or [])
     warnings.extend(
         warning
         for reaction in zone_reactions
@@ -6203,13 +6548,13 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
     prev_end = et_datetime(prev_day, 16, 5)
 
     try:
-        today_bars = fetch_bars(active_symbol, today_start, today_end, timeframe=timeframe)
-        prev_bars = fetch_bars(active_symbol, prev_start, prev_end, timeframe=timeframe)
+        today_bars_1min = fetch_bars(active_symbol, today_start, today_end, timeframe="1Min")
+        prev_bars_1min = fetch_bars(active_symbol, prev_start, prev_end, timeframe="1Min")
         chart_session_day = day
         chart_session_historical = False
         chart_session_reason = None
 
-        if not today_bars:
+        if not today_bars_1min:
             chart_session_day = previous_weekday(day)
             chart_session_historical = chart_session_day != day
             if chart_session_historical:
@@ -6219,23 +6564,27 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
                 prior_session_day = previous_weekday(chart_session_day)
                 prev_start = et_datetime(prior_session_day, 9, 30)
                 prev_end = et_datetime(prior_session_day, 16, 5)
-                today_bars = fetch_bars(active_symbol, today_start, today_end, timeframe=timeframe)
-                prev_bars = fetch_bars(active_symbol, prev_start, prev_end, timeframe=timeframe)
+                today_bars_1min = fetch_bars(active_symbol, today_start, today_end, timeframe="1Min")
+                prev_bars_1min = fetch_bars(active_symbol, prev_start, prev_end, timeframe="1Min")
 
-        levels = calc_levels(today_bars, prev_bars)
-        candles = normalize_candles(today_bars)
-
-        current_price = (
-            candles[-1]["close"]
-            if chart_session_historical and candles
-            else latest_trade["price"] if active_symbol == SYMBOL and latest_trade else (candles[-1]["close"] if candles else None)
+        provider_bars = (
+            today_bars_1min
+            if timeframe == "1Min"
+            else fetch_bars(active_symbol, today_start, today_end, timeframe=timeframe)
         )
+        integrity = build_candle_integrity_bundle(today_bars_1min, active_symbol, timeframe, provider_bars)
+        previous_integrity = build_candle_integrity_bundle(prev_bars_1min, active_symbol, "1Min", prev_bars_1min)
+        candles = integrity["validated_candles"]
+        levels = calc_levels(
+            integrity["validated_1min_candles"],
+            previous_integrity["validated_1min_candles"],
+            session_day=chart_session_day,
+        )
+        current_price = candles[-1]["close"] if candles else None
 
-        if candles and active_symbol == SYMBOL and live_candles.get(timeframe) and not chart_session_historical:
-            if candles[-1]["time"] == live_candles[timeframe]["time"]:
-                candles[-1] = live_candles[timeframe]
-            else:
-                candles.append(live_candles[timeframe])
+        with candle_audit_lock:
+            latest_candle_audits[(active_symbol, timeframe)] = integrity
+            recent_validated_candles[active_symbol] = integrity["validated_1min_candles"][-40:]
 
         regular_candles = []
         for c in candles:
@@ -6278,8 +6627,11 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
                 continue
 
             try:
-                htf_bars = fetch_bars(active_symbol, today_start, today_end, timeframe=htf)
-                htf_candles = normalize_candles(htf_bars)
+                htf_candles = aggregate_validated_candles(
+                    integrity["validated_1min_candles"],
+                    htf,
+                    integrity["audited_1min_candles"],
+                )
                 htf_regular = []
                 for hc in htf_candles:
                     hdt = datetime.fromtimestamp(hc["time"], tz=timezone.utc)
@@ -6481,12 +6833,23 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
                 "read_only": True,
             },
             "indicators": indicators,
+            "data_quality_status": integrity["data_quality_status"],
+            "candle_accuracy_mode": integrity["candle_accuracy_mode"],
+            "raw_candle_count": integrity["raw_candle_count"],
+            "validated_candle_count": integrity["validated_candle_count"],
+            "suspicious_candle_count": integrity["suspicious_candle_count"],
+            "rejected_candle_count": integrity["rejected_candle_count"],
+            "corrected_candle_count": integrity["corrected_candle_count"],
+            "candle_data_warnings": integrity["candle_data_warnings"],
+            "bad_print_filter_enabled": True,
             "data_status": "ok",
             "errors": [],
         }
         chart_line_audit = build_chart_line_registry(chart_snapshot, active_symbol, timeframe)
         chart_snapshot["chart_lines"] = chart_line_audit["chart_lines"]
-        chart_snapshot["chart_line_warnings"] = chart_line_audit["warnings"]
+        chart_snapshot["chart_line_warnings"] = list(dict.fromkeys(
+            chart_line_audit["warnings"] + integrity["candle_data_warnings"]
+        ))
         return jsonify(chart_snapshot)
     except Exception as e:
         return jsonify({
@@ -6514,6 +6877,15 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
             "indicators": {},
             "chart_lines": [],
             "chart_line_warnings": ["Chart data unavailable; no plotted lines were registered."],
+            "data_quality_status": "DEGRADED",
+            "candle_accuracy_mode": "RAW_PROVIDER",
+            "raw_candle_count": 0,
+            "validated_candle_count": 0,
+            "suspicious_candle_count": 0,
+            "rejected_candle_count": 0,
+            "corrected_candle_count": 0,
+            "candle_data_warnings": ["Candle validation could not complete."],
+            "bad_print_filter_enabled": True,
             "data_status": "error",
             "errors": [str(e)],
         }), 500
@@ -6540,6 +6912,35 @@ def debug_chart_lines():
         "line_count": len(payload.get("chart_lines") or []),
         "chart_lines": payload.get("chart_lines") or [],
         "warnings": payload.get("chart_line_warnings") or [],
+        "data_quality_status": payload.get("data_quality_status"),
+        "candle_accuracy_mode": payload.get("candle_accuracy_mode"),
+        "candle_data_warnings": payload.get("candle_data_warnings") or [],
+        "read_only": True,
+    })
+
+
+@APP.route("/api/debug/candles")
+def debug_candles():
+    symbol = normalize_symbol(request.args.get("symbol", SYMBOL))
+    timeframe = request.args.get("timeframe", "5Min")
+    timeframe = timeframe if timeframe in TIMEFRAMES else "5Min"
+    response = chart_data(timeframe_override=timeframe, include_logging=False, symbol_override=symbol)
+    if isinstance(response, tuple):
+        response = response[0]
+    with candle_audit_lock:
+        audit = dict(latest_candle_audits.get((symbol, timeframe)) or {})
+    limit = 500
+    return jsonify({
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "data_quality_status": audit.get("data_quality_status", "DEGRADED"),
+        "candle_accuracy_mode": audit.get("candle_accuracy_mode", "RAW_PROVIDER"),
+        "raw_candles": (audit.get("raw_candles") or [])[-limit:],
+        "validated_candles": (audit.get("validated_candles") or [])[-limit:],
+        "suspicious_candles": (audit.get("suspicious_candles") or [])[-limit:],
+        "rejected_candles": (audit.get("rejected_candles") or [])[-limit:],
+        "candle_data_warnings": audit.get("candle_data_warnings") or [],
+        "cross_timeframe_validation": (audit.get("cross_timeframe_validation") or [])[-limit:],
         "read_only": True,
     })
 

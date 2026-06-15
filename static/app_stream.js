@@ -4,6 +4,7 @@ const statusEl = document.getElementById("status");
 const errorEl = document.getElementById("error");
 const countdownEl = document.getElementById("countdown");
 const streamStatusEl = document.getElementById("streamStatus");
+const dataQualityStatusEl = document.getElementById("dataQualityStatus");
 const chartEmptyEl = document.getElementById("chartEmpty");
 const tfButtons = document.querySelectorAll(".tf-btn");
 const toggleButtons = document.querySelectorAll(".toggle-btn[data-layer]");
@@ -553,7 +554,9 @@ function renderLineAudit(selectedId = null) {
     (a.priority || 3) - (b.priority || 3) || String(a.short_label).localeCompare(String(b.short_label))
   );
   const visibleCount = lines.filter(line => lineDisplayDecision(line).visible).length;
-  lineAuditMeta.textContent = `${activeSymbol} · ${activeTimeframe} · ${visibleCount}/${lines.length} visible deterministic items`;
+  const quality = latestPayload?.data_quality_status || "DEGRADED";
+  const qualityWarning = (latestPayload?.candle_data_warnings || []).join(" | ");
+  lineAuditMeta.textContent = `${activeSymbol} · ${activeTimeframe} · ${visibleCount}/${lines.length} visible deterministic items · Data ${quality}${qualityWarning ? `: ${qualityWarning}` : ""}`;
   lineAuditList.innerHTML = lines.map(line => {
     const decision = lineDisplayDecision(line);
     return `
@@ -588,7 +591,7 @@ function legendGroup(title, items, className = "") {
 
 function warningTone(text) {
   const value = String(text || "").toUpperCase();
-  if (value.includes("NO_TRADE") || value.includes("CHOP") || value.includes("FAILED") || value.includes("INVALIDATED")) return "alert";
+  if (value.includes("NO_TRADE") || value.includes("CHOP") || value.includes("FAILED") || value.includes("INVALIDATED") || value.includes("DEGRADED")) return "alert";
   if (value.includes("WAIT") || value.includes("WARNING") || value.includes("MIXED")) return "caution";
   return "";
 }
@@ -739,6 +742,11 @@ function updateLegend(data) {
   ];
   const warningText = (latestPayload.professional_context?.warnings || []).join(" | ") || "No active warnings";
   const riskItems = [
+    textPill(
+      `Candle Data ${latestPayload.data_quality_status || "DEGRADED"} · ${latestPayload.candle_accuracy_mode || "RAW_PROVIDER"}`,
+      warningTone(latestPayload.data_quality_status)
+    ),
+    ...(latestPayload.candle_data_warnings || []).map(warning => textPill(warning, "caution")),
     textPill(warningText, warningText === "No active warnings" ? "" : "alert"),
     textPill(`Chop ${regime.chop_score ?? "n/a"}`, Number(regime.chop_score || 0) >= 60 ? "alert" : ""),
     textPill(`Logger setups +${latestPayload.setup_logging?.logged_setups ?? 0} · outcomes +${latestPayload.setup_logging?.outcomes_evaluated ?? 0}`),
@@ -756,6 +764,15 @@ function updateLegend(data) {
   streamStatusEl.textContent = stream.connected ? "Stream connected" : `Stream ${stream.error || "waiting"}`;
   streamStatusEl.classList.toggle("connected", Boolean(stream.connected));
   streamStatusEl.classList.toggle("reconnecting", !stream.connected);
+  if (dataQualityStatusEl) {
+    const quality = latestPayload.data_quality_status || "DEGRADED";
+    const filtered = Number(latestPayload.suspicious_candle_count || 0) + Number(latestPayload.rejected_candle_count || 0);
+    dataQualityStatusEl.textContent = quality === "CLEAN"
+      ? `Data clean · ${latestPayload.candle_accuracy_mode || "VALIDATED"}`
+      : `Data ${quality.toLowerCase()}${filtered ? ` · ${filtered} filtered` : ""}`;
+    dataQualityStatusEl.classList.toggle("data-warning", quality === "WARNING");
+    dataQualityStatusEl.classList.toggle("data-degraded", quality === "DEGRADED");
+  }
 }
 
 
@@ -957,10 +974,20 @@ function connectStream() {
       updateLegend(latestPayload);
     }
 
+    if (data.type === "data_quality_warning") {
+      latestPayload = {
+        ...(latestPayload || {}),
+        data_quality_status: data.data_quality_status || "WARNING",
+        candle_data_warnings: data.candle_data_warnings || [],
+        bad_print_filter_enabled: true,
+        stream_status: data.stream_status,
+      };
+      updateLegend(latestPayload);
+    }
+
     if (data.type === "heartbeat") {
       latestPayload = {
         ...(latestPayload || {}),
-        current_price: data.latest_trade?.price || latestPayload?.current_price,
         latest_trade: data.latest_trade || latestPayload?.latest_trade,
         stream_status: data.stream_status,
       };
