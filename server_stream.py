@@ -667,6 +667,7 @@ def calc_levels(today_bars, prev_bars, session_day=None):
     day = session_day or today_et()
     premarket_start = et_datetime(day, 4, 0)
     market_open = et_datetime(day, 9, 30)
+    opening_5m_end = et_datetime(day, 9, 35)
 
     pre_bars = []
     for b in today_bars:
@@ -692,13 +693,222 @@ def calc_levels(today_bars, prev_bars, session_day=None):
         if prev_open <= t <= prev_close:
             regular_prev.append(b)
 
+    regular_today = []
+    opening_5m_bars = []
+    for b in today_bars:
+        t = (
+            datetime.fromtimestamp(b["time"], tz=timezone.utc).astimezone(ET)
+            if b.get("time") is not None
+            else datetime.fromisoformat(b["t"].replace("Z", "+00:00")).astimezone(ET)
+        )
+        if market_open <= t <= et_datetime(day, 16, 0):
+            regular_today.append(b)
+        if market_open <= t < opening_5m_end:
+            opening_5m_bars.append(b)
+
+    opening_5m_complete = len({b.get("time") for b in opening_5m_bars if b.get("time") is not None}) >= 5
+
     return {
         "pmh": max((b.get("high", b.get("h")) for b in pre_bars), default=None),
         "pml": min((b.get("low", b.get("l")) for b in pre_bars), default=None),
         "pdh": max((b.get("high", b.get("h")) for b in regular_prev), default=None),
         "pdl": min((b.get("low", b.get("l")) for b in regular_prev), default=None),
         "pdc": regular_prev[-1].get("close", regular_prev[-1].get("c")) if regular_prev else None,
+        "hod": max((b.get("high", b.get("h")) for b in regular_today), default=None),
+        "lod": min((b.get("low", b.get("l")) for b in regular_today), default=None),
+        "opening_5m_high": max((b.get("high", b.get("h")) for b in opening_5m_bars), default=None) if opening_5m_complete else None,
+        "opening_5m_low": min((b.get("low", b.get("l")) for b in opening_5m_bars), default=None) if opening_5m_complete else None,
+        "opening_5m_complete": opening_5m_complete,
+        "opening_5m_window": "09:30 ET <= candle time < 09:35 ET",
         "premarket_window": "04:00 ET <= candle time < 09:30 ET",
+    }
+
+
+def fvg_quality_grade(score):
+    if score >= 80:
+        return "A"
+    if score >= 65:
+        return "B"
+    if score >= 50:
+        return "C"
+    return "WEAK"
+
+
+def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None, supply_demand=None, support_resistance=None, atr14=None):
+    """
+    Deterministic read-only fair value gap detector.
+    Uses validated/rebuilt chart candles only.
+    """
+    candles = candles or []
+    levels = levels or {}
+    supply_demand = supply_demand or {"demand": [], "supply": []}
+    support_resistance = support_resistance or {"support": [], "resistance": []}
+    if len(candles) < 3:
+        return {"bullish": [], "bearish": [], "all": [], "meta": {"read_only": True, "reason": "Need at least three candles."}}
+
+    if atr14 is None:
+        atr_values = calc_atr14(candles, 14)
+        atr14 = latest_indicator_value(atr_values)
+    if atr14 is None:
+        ranges = [c.get("high", 0) - c.get("low", 0) for c in candles[-20:] if c.get("high") is not None and c.get("low") is not None]
+        atr14 = _median(ranges) or 0.10
+
+    tolerance = max(0.03, (atr14 or 0) * 0.20)
+
+    def price_near(price, reference):
+        return price is not None and reference is not None and abs(price - reference) <= tolerance
+
+    def confluence(midpoint, bottom, top):
+        labels = []
+        for label, price in [
+            ("PMH", levels.get("pmh")),
+            ("PML", levels.get("pml")),
+            ("PDH", levels.get("pdh")),
+            ("PDL", levels.get("pdl")),
+            ("HOD", levels.get("hod")),
+            ("LOD", levels.get("lod")),
+            ("OPEN 5M HIGH", levels.get("opening_5m_high")),
+            ("OPEN 5M LOW", levels.get("opening_5m_low")),
+        ]:
+            if price_near(midpoint, price) or (price is not None and bottom - tolerance <= price <= top + tolerance):
+                labels.append(label)
+        for side in ["demand", "supply"]:
+            for zone in supply_demand.get(side, []) or []:
+                if ranges_overlap(bottom, top, zone.get("low"), zone.get("high")):
+                    labels.append("SUPPLY/DEMAND")
+                    break
+        for side in ["support", "resistance"]:
+            for level in support_resistance.get(side, []) or []:
+                if level.get("quality_grade") in {"A", "B"} and price_near(midpoint, level.get("price")):
+                    labels.append(f"{level.get('quality_grade')} {side.upper()}")
+                    break
+        return list(dict.fromkeys(labels))
+
+    gaps = []
+    for index in range(2, len(candles)):
+        candle1 = candles[index - 2]
+        candle2 = candles[index - 1]
+        candle3 = candles[index]
+        gap_type = None
+        bottom = top = None
+        if candle1.get("high") is not None and candle3.get("low") is not None and candle1["high"] < candle3["low"]:
+            gap_type = "BULLISH_FVG"
+            bottom = candle1["high"]
+            top = candle3["low"]
+        elif candle1.get("low") is not None and candle3.get("high") is not None and candle1["low"] > candle3["high"]:
+            gap_type = "BEARISH_FVG"
+            bottom = candle3["high"]
+            top = candle1["low"]
+        if not gap_type or top is None or bottom is None or top <= bottom:
+            continue
+
+        created_at = candle3.get("time")
+        following = candles[index + 1:]
+        height = max(0.0001, top - bottom)
+        touch_count = 0
+        last_touch_time = None
+        fill_percentage = 0.0
+        if gap_type == "BULLISH_FVG":
+            deepest = top
+            for candle in following:
+                if candle.get("low") is None:
+                    continue
+                if candle["low"] <= top and candle.get("high", candle["low"]) >= bottom:
+                    touch_count += 1
+                    last_touch_time = candle.get("time")
+                    deepest = min(deepest, candle["low"])
+            fill_percentage = max(0, min(100, (top - deepest) / height * 100))
+        else:
+            highest = bottom
+            for candle in following:
+                if candle.get("high") is None:
+                    continue
+                if candle["high"] >= bottom and candle.get("low", candle["high"]) <= top:
+                    touch_count += 1
+                    last_touch_time = candle.get("time")
+                    highest = max(highest, candle["high"])
+            fill_percentage = max(0, min(100, (highest - bottom) / height * 100))
+
+        if fill_percentage >= 99:
+            status = "FILLED"
+        elif fill_percentage > 0:
+            status = "PARTIALLY_FILLED"
+        else:
+            status = "ACTIVE"
+
+        age = len(candles) - index - 1
+        midpoint = (top + bottom) / 2
+        gap_vs_atr = height / max(0.01, atr14 or 0.01)
+        impulse_range = candle2.get("high", 0) - candle2.get("low", 0)
+        impulse_score = min(100, int((impulse_range / max(0.01, atr14 or 0.01)) * 35))
+        freshness_score = max(10, 100 - age * 4)
+        fill_score = 100 if status == "ACTIVE" else 72 if status == "PARTIALLY_FILLED" else 18
+        size_score = 25 if gap_vs_atr < 0.12 else 95 if gap_vs_atr <= 1.4 else 55
+        confluence_labels = confluence(midpoint, bottom, top)
+        confluence_score = min(100, len(confluence_labels) * 28)
+        quality_score = int(
+            freshness_score * 0.25
+            + fill_score * 0.25
+            + impulse_score * 0.20
+            + size_score * 0.15
+            + confluence_score * 0.15
+        )
+        if status == "FILLED":
+            quality_score -= 35
+        if touch_count >= 3:
+            quality_score -= 10
+        quality_score = max(0, min(100, quality_score))
+        grade = fvg_quality_grade(quality_score)
+        warnings = []
+        if status == "FILLED":
+            warnings.append("FVG is filled; audit context only.")
+        if touch_count >= 3:
+            warnings.append("FVG has multiple touches.")
+        if grade == "WEAK":
+            warnings.append("Weak FVG quality.")
+
+        gaps.append({
+            "id": f"{symbol}-{timeframe}-{gap_type}-{created_at}-{round_price(bottom)}-{round_price(top)}",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "type": gap_type,
+            "top": round_price(top),
+            "bottom": round_price(bottom),
+            "midpoint": round_price(midpoint),
+            "created_at": created_at,
+            "last_touch_time": last_touch_time,
+            "touch_count": touch_count,
+            "fill_percentage": round(fill_percentage, 1),
+            "status": status,
+            "quality_score": quality_score,
+            "quality_grade": grade,
+            "confluence": confluence_labels,
+            "confluence_count": len(confluence_labels),
+            "impulse_score": impulse_score,
+            "freshness_score": freshness_score,
+            "size_score": size_score,
+            "worth_showing": status in {"ACTIVE", "PARTIALLY_FILLED"} and grade in {"A", "B", "C"},
+            "warnings": warnings,
+            "read_only": True,
+        })
+
+    gaps = sorted(gaps, key=lambda gap: (
+        0 if gap["status"] == "ACTIVE" else 1 if gap["status"] == "PARTIALLY_FILLED" else 2,
+        -gap["quality_score"],
+        -(gap.get("created_at") or 0),
+    ))
+    bullish = [gap for gap in gaps if gap["type"] == "BULLISH_FVG"][:8]
+    bearish = [gap for gap in gaps if gap["type"] == "BEARISH_FVG"][:8]
+    return {
+        "bullish": bullish,
+        "bearish": bearish,
+        "all": bullish + bearish,
+        "meta": {
+            "rule": "Bullish FVG when candle1.high < candle3.low; bearish FVG when candle1.low > candle3.high.",
+            "quality_rule": "Freshness, unfilled status, impulse, size vs ATR, and confluence.",
+            "read_only": True,
+        },
+        "read_only": True,
     }
 
 
@@ -4939,7 +5149,7 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
             "reason": reason,
             "confidence": int(max(0, min(100, confidence))) if numeric(confidence) else None,
             "strength": strength if strength in {"A", "B", "C", "WEAK", "UNKNOWN"} else "UNKNOWN",
-            "status": status if status in {"ACTIVE", "TESTED", "HOLDING", "FAILED", "MUTED", "UNKNOWN"} else "UNKNOWN",
+            "status": status if status in {"ACTIVE", "PARTIALLY_FILLED", "FILLED", "INVALID", "TESTED", "HOLDING", "FAILED", "MUTED", "UNKNOWN"} else "UNKNOWN",
             "priority": priority if priority in {1, 2, 3} else 3,
             "visible_in_clean_mode": bool(clean),
             "visible_in_full_mode": bool(full),
@@ -4949,14 +5159,18 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
 
     levels = snapshot.get("levels") or {}
     level_specs = [
-        ("pmh", "PMH", "premarket_high_low", "Maximum high from selected-day premarket candles", "Selected-day premarket high"),
-        ("pml", "PML", "premarket_high_low", "Minimum low from selected-day premarket candles", "Selected-day premarket low"),
-        ("pdh", "PDH", "previous_regular_session", "Maximum high from previous regular session", "Previous regular-session high"),
-        ("pdl", "PDL", "previous_regular_session", "Minimum low from previous regular session", "Previous regular-session low"),
-        ("pdc", "PDC", "previous_regular_session", "Final close from previous regular session", "Previous regular-session close"),
+        ("pmh", "PMH", "premarket_high_low", "Maximum high from selected-day premarket candles", "Selected-day premarket high", True),
+        ("pml", "PML", "premarket_high_low", "Minimum low from selected-day premarket candles", "Selected-day premarket low", True),
+        ("pdh", "PDH", "previous_regular_session", "Maximum high from previous regular session", "Previous regular-session high", True),
+        ("pdl", "PDL", "previous_regular_session", "Minimum low from previous regular session", "Previous regular-session low", True),
+        ("pdc", "PDC", "previous_regular_session", "Final close from previous regular session", "Previous regular-session close", False),
+        ("hod", "HOD", "regular_session", "Maximum high from selected-day regular-session validated candles", "High of day", True),
+        ("lod", "LOD", "regular_session", "Minimum low from selected-day regular-session validated candles", "Low of day", True),
+        ("opening_5m_high", "OPEN 5M HIGH", "opening_range", "High from completed 09:30-09:35 ET validated 1Min candles", "First 5-minute candle high", True),
+        ("opening_5m_low", "OPEN 5M LOW", "opening_range", "Low from completed 09:30-09:35 ET validated 1Min candles", "First 5-minute candle low", True),
     ]
-    for key, label, source, method, reason in level_specs:
-        add(label, label, label, source, method, reason, price=levels.get(key), priority=1)
+    for key, label, source, method, reason, clean in level_specs:
+        add(label, label, label, source, method, reason, price=levels.get(key), priority=1, clean=clean)
 
     indicators = snapshot.get("indicators") or {}
     for key, line_type, label, period in [
@@ -5026,7 +5240,33 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
                         f"{short} zone {field} derived from zone boundaries",
                         price=zone.get(field), confidence=zone.get("zone_quality_score"), strength=grade,
                         status="MUTED" if failed else "ACTIVE", priority=3, clean=False,
-                    )
+            )
+
+    fair_value_gaps = snapshot.get("fair_value_gaps") or {}
+    for gap in (fair_value_gaps.get("bullish") or []) + (fair_value_gaps.get("bearish") or []):
+        gap_type = gap.get("type")
+        label = "BULL FVG" if gap_type == "BULLISH_FVG" else "BEAR FVG"
+        status = gap.get("status") or "UNKNOWN"
+        grade = gap.get("quality_grade") or "UNKNOWN"
+        active = status in {"ACTIVE", "PARTIALLY_FILLED"}
+        add(
+            gap_type or "FVG",
+            f"{label} {grade}",
+            label,
+            "fair_value_gap_engine",
+            "Deterministic three-candle imbalance detection using validated/rebuilt candles",
+            "; ".join(gap.get("confluence") or []) or f"{status} {label} from candle1/candle3 gap",
+            top=gap.get("top"),
+            bottom=gap.get("bottom"),
+            start_time=gap.get("created_at"),
+            end_time=gap.get("last_touch_time"),
+            confidence=gap.get("quality_score"),
+            strength=grade,
+            status=status,
+            priority=1 if active and grade in {"A", "B"} else 2 if active and grade == "C" else 3,
+            clean=active and grade in {"A", "B", "C"} and bool(gap.get("worth_showing")),
+            item_warnings=gap.get("warnings") or [],
+        )
 
     sweeps = snapshot.get("liquidity_sweeps") or {}
     for side in ["upside", "downside"]:
@@ -5347,6 +5587,7 @@ def compact_intraday_ai_context(payload):
     )
     support_resistance = payload.get("support_resistance") or {}
     supply_demand = payload.get("supply_demand") or {}
+    fair_value_gaps = payload.get("fair_value_gaps") or {}
     chart_lines = payload.get("chart_lines") or []
     zone_reactions = [
         {
@@ -5398,6 +5639,21 @@ def compact_intraday_ai_context(payload):
         "risk_reward": compact_risk_reward(best_setup.get("risk_reward")) if best_setup else None,
         "volume_context": build_ai_volume_context(candles, best_setup),
         "zone_reactions": zone_reactions,
+        "fair_value_gaps": [
+            {
+                "type": gap.get("type"),
+                "top": gap.get("top"),
+                "bottom": gap.get("bottom"),
+                "midpoint": gap.get("midpoint"),
+                "status": gap.get("status"),
+                "quality_grade": gap.get("quality_grade"),
+                "quality_score": gap.get("quality_score"),
+                "fill_percentage": gap.get("fill_percentage"),
+                "read_only": True,
+            }
+            for gap in (fair_value_gaps.get("bullish") or [])[:3] + (fair_value_gaps.get("bearish") or [])[:3]
+            if gap.get("status") in {"ACTIVE", "PARTIALLY_FILLED"}
+        ],
         "chart_line_audit": [
             {
                 "type": line.get("type"),
@@ -6977,6 +7233,16 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
             liquidity_sweeps=liquidity_sweeps,
         )
 
+        fair_value_gaps = detect_fair_value_gaps(
+            indicators_source,
+            symbol=active_symbol,
+            timeframe=timeframe,
+            levels=levels,
+            supply_demand=supply_demand,
+            support_resistance=support_resistance,
+            atr14=latest_atr14,
+        )
+
         confirmation_setups = detect_confirmation_setups(
             indicators_source,
             current_price=current_price,
@@ -7069,6 +7335,7 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
             "support_resistance": support_resistance,
             "structure_reactions": structure_reactions,
             "supply_demand": supply_demand,
+            "fair_value_gaps": fair_value_gaps,
             "liquidity_sweeps": liquidity_sweeps,
             "level_clusters": level_clusters,
             "confirmation_setups": confirmation_setups,
@@ -7118,6 +7385,7 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
             "support_resistance": {"support": [], "resistance": []},
             "structure_reactions": {"support_watch": [], "resistance_watch": [], "meta": {"reason": "error"}},
             "supply_demand": {"demand": [], "supply": []},
+            "fair_value_gaps": {"bullish": [], "bearish": [], "all": [], "meta": {"reason": "error", "read_only": True}},
             "liquidity_sweeps": {"upside": [], "downside": [], "status": "ERROR"},
             "level_clusters": {"clusters": [], "note": "error"},
             "confirmation_setups": {"status": "ERROR", "trend": {}, "setups": [], "meta": {"read_only": True}},

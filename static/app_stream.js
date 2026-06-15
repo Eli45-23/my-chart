@@ -45,6 +45,7 @@ const layerState = {
   emas: true,
   sr: true,
   supplyDemand: true,
+  fvg: true,
   weakZones: false,
   liquiditySweeps: true,
   clusters: true,
@@ -80,6 +81,11 @@ const COLORS = {
   confirmationInvalid: "#727d8b",
   aiEntryBullish: "#62ad91",
   aiEntryBearish: "#cf7373",
+  bullFvg: "#5da68f",
+  bearFvg: "#c87575",
+  weakFvg: "#5f6875",
+  hodLod: "#9fb5cf",
+  openingRange: "#d1b56d",
 };
 
 let activeTimeframe = "1Min";
@@ -262,7 +268,12 @@ function lineDisplayDecision(line) {
   if (!cleanMode) return { visible: true, hiddenReason: null };
 
   const alwaysVisible = new Set(["VWAP", "EMA9", "EMA20"]);
-  if (alwaysVisible.has(line.type)) return { visible: true, hiddenReason: null };
+  if (alwaysVisible.has(line.type)) return { visible: !cleanMode, hiddenReason: cleanMode ? "hidden in trader Clean Mode" : null };
+  const cleanTypes = new Set([
+    "PMH", "PML", "PDH", "PDL", "HOD", "LOD", "OPEN 5M HIGH", "OPEN 5M LOW",
+    "BULLISH_FVG", "BEARISH_FVG", "DEMAND_ZONE", "SUPPLY_ZONE", "SUPPORT", "RESISTANCE",
+  ]);
+  if (!cleanTypes.has(line.type)) return { visible: false, hiddenReason: "hidden in trader Clean Mode" };
   if (!line.source || !line.reason) return { visible: false, hiddenReason: "no valid source" };
   if (line.status === "FAILED") return { visible: false, hiddenReason: "failed" };
   if (line.strength === "WEAK") return { visible: false, hiddenReason: "weak" };
@@ -286,7 +297,8 @@ function chartSupplyDemandZones(zones) {
   if (cleanMode) {
     const currentPrice = latestPayload?.current_price || latestPayload?.latest_trade?.price;
     return available.filter(zone => {
-      if (!["HOLD", "RECLAIM", "REJECTION"].includes(zone.reaction_status)) return false;
+      if (zone.reaction_status === "FAILED" || zone.zone_quality_grade === "WEAK") return false;
+      if (!["A", "B", "C"].includes(zone.zone_quality_grade)) return false;
       return isLineNearCurrentPrice({ top: zone.high, bottom: zone.low }, currentPrice, activeSymbol);
     });
   }
@@ -300,7 +312,7 @@ function updateCleanModeControl() {
   cleanModeToggle.textContent = `Clean Mode: ${cleanMode ? "On" : "Off"}`;
 
   toggleButtons.forEach((btn) => {
-    const suppressedLayers = ["weakZones", "liquiditySweeps", "clusters", "reactionZones"];
+    const suppressedLayers = ["vwap", "emas", "weakZones", "liquiditySweeps", "clusters", "reactionZones", "confirmationSetups"];
     const suppressed = cleanMode && suppressedLayers.includes(btn.dataset.layer);
     btn.classList.toggle("clean-mode-suppressed", suppressed);
     btn.title = suppressed ? "Hidden while Clean Mode is on" : "";
@@ -311,9 +323,9 @@ function applyIndicatorVisibility() {
   const auditTypeVisible = type => (latestPayload?.chart_lines || []).some(line =>
     line.type === type && lineDisplayDecision(line).visible
   );
-  vwapSeries.applyOptions({ visible: layerState.vwap && auditTypeVisible("VWAP"), lineWidth: 2 });
-  ema9Series.applyOptions({ visible: layerState.emas && auditTypeVisible("EMA9"), lineWidth: cleanMode ? 2 : 1 });
-  ema20Series.applyOptions({ visible: layerState.emas && auditTypeVisible("EMA20"), lineWidth: 1 });
+  vwapSeries.applyOptions({ visible: !cleanMode && layerState.vwap && auditTypeVisible("VWAP"), lineWidth: 2 });
+  ema9Series.applyOptions({ visible: !cleanMode && layerState.emas && auditTypeVisible("EMA9"), lineWidth: 1 });
+  ema20Series.applyOptions({ visible: !cleanMode && layerState.emas && auditTypeVisible("EMA20"), lineWidth: 1 });
 }
 
 function clearPriceLines() {
@@ -455,6 +467,9 @@ function addZoneBand(label, zone, colors) {
     if (zone.reaction_label && !failed) {
       const reactionColor = zone.type === "demand" ? COLORS.demandReaction : COLORS.supplyReaction;
       addLevel(zone.reaction_label, zone.defended_edge, reactionColor, LightweightCharts.LineStyle.Solid, true, 2);
+    } else if (!failed && !weak) {
+      const cleanLabel = zone.type === "demand" ? "DEMAND" : "SUPPLY";
+      addLevel(cleanLabel, (Number(low) + Number(high)) / 2, zoneColor, LightweightCharts.LineStyle.Dashed, true, 2);
     }
     return;
   }
@@ -535,6 +550,22 @@ function addReactionZone(label, zone, color) {
   addLevel(`${label} Watch Upper`, high, color, LightweightCharts.LineStyle.Dotted, false);
   addLevel(`${label} Watch Lower`, low, color, LightweightCharts.LineStyle.Dotted, false);
   addLevel(rangeLabel, mid, color, LightweightCharts.LineStyle.Dashed, true);
+}
+
+function addFvgBand(gap) {
+  if (!gap) return;
+  const low = gap.bottom;
+  const high = gap.top;
+  if (low === null || low === undefined || high === null || high === undefined) return;
+  if (cleanMode && !(gap.worth_showing && ["ACTIVE", "PARTIALLY_FILLED"].includes(gap.status))) return;
+  const label = gap.type === "BULLISH_FVG" ? "BULL FVG" : "BEAR FVG";
+  const weak = gap.quality_grade === "WEAK" || ["FILLED", "INVALID"].includes(gap.status);
+  const color = weak ? COLORS.weakFvg : gap.type === "BULLISH_FVG" ? COLORS.bullFvg : COLORS.bearFvg;
+  const mid = (Number(low) + Number(high)) / 2;
+  const style = weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed;
+  addLevel(`${label} Top ${gap.quality_grade || ""}`, high, color, LightweightCharts.LineStyle.Dotted, false);
+  addLevel(`${label} Bottom ${gap.quality_grade || ""}`, low, color, LightweightCharts.LineStyle.Dotted, false);
+  addLevel(`${label} ${gap.quality_grade || ""}`, mid, color, style, !weak, weak ? 1 : 2);
 }
 
 function textPill(text, tone = "") {
@@ -818,12 +849,14 @@ function updateLegend(data) {
     textPill(levels.premarket_window || "Premarket 04:00-09:30 ET"),
   ];
   const levelItems = [
-    pill("PMH", levels.pmh), pill("PML", levels.pml), pill("PDH", levels.pdh), pill("PDL", levels.pdl), pill("PDC", levels.pdc),
-    pill("VWAP", latestVWAP), pill("EMA9", latestEMA9), cleanMode ? "" : pill("EMA20", latestEMA20),
+    pill("PMH", levels.pmh), pill("PML", levels.pml), pill("PDH", levels.pdh), pill("PDL", levels.pdl),
+    pill("HOD", levels.hod), pill("LOD", levels.lod), pill("OPEN 5M HIGH", levels.opening_5m_high), pill("OPEN 5M LOW", levels.opening_5m_low),
+    cleanMode ? "" : pill("PDC", levels.pdc), cleanMode ? "" : pill("VWAP", latestVWAP), cleanMode ? "" : pill("EMA9", latestEMA9), cleanMode ? "" : pill("EMA20", latestEMA20),
     cleanMode ? "" : textPill(`Support ${(latestPayload.support_resistance?.support || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""}`).join(", ") || "none"}`),
     cleanMode ? "" : textPill(`Resistance ${(latestPayload.support_resistance?.resistance || []).map(x => `${x.price.toFixed(2)} ${x.quality_grade || x.reliability_label || ""}`).join(", ") || "none"}`),
     textPill(`Demand ${demandZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.reaction_label || z.zone_quality_grade || ""}`).join(", ") || "none"}`),
     textPill(`Supply ${supplyZones.map(z => `${z.low.toFixed(2)}-${z.high.toFixed(2)} ${z.reaction_label || z.zone_quality_grade || ""}`).join(", ") || "none"}`),
+    textPill(`FVG ${(latestPayload.fair_value_gaps?.all || []).filter(g => ["ACTIVE", "PARTIALLY_FILLED"].includes(g.status)).slice(0, 4).map(g => `${g.type === "BULLISH_FVG" ? "Bull" : "Bear"} ${g.bottom.toFixed(2)}-${g.top.toFixed(2)} ${g.quality_grade}`).join(", ") || "none"}`),
   ];
   const researchItems = [
     cleanMode ? "" : textPill(`Reaction Zones ${[
@@ -943,7 +976,11 @@ function drawStaticLevels(data) {
   if (layerState.previousDay) {
     addLevel("PDH", levels.pdh, COLORS.previousHighLow, LightweightCharts.LineStyle.Dashed);
     addLevel("PDL", levels.pdl, COLORS.previousHighLow, LightweightCharts.LineStyle.Dashed);
-    addLevel("PDC", levels.pdc, COLORS.previousClose, LightweightCharts.LineStyle.Dotted);
+    if (!cleanMode) addLevel("PDC", levels.pdc, COLORS.previousClose, LightweightCharts.LineStyle.Dotted);
+    addLevel("HOD", levels.hod, COLORS.hodLod, LightweightCharts.LineStyle.Solid);
+    addLevel("LOD", levels.lod, COLORS.hodLod, LightweightCharts.LineStyle.Solid);
+    addLevel("OPEN 5M HIGH", levels.opening_5m_high, COLORS.openingRange, LightweightCharts.LineStyle.Dashed);
+    addLevel("OPEN 5M LOW", levels.opening_5m_low, COLORS.openingRange, LightweightCharts.LineStyle.Dashed);
   }
 
   if (isLayerVisible("sr")) {
@@ -985,6 +1022,11 @@ function drawStaticLevels(data) {
     chartSupplyDemandZones(sd.demand).forEach((zone, index) => {
       addZoneBand(`Demand ${index + 1}`, zone, { zone: isWeakZone(zone) ? COLORS.weakDemand : COLORS.demand });
     });
+  }
+
+  if (isLayerVisible("fvg")) {
+    const fvg = data.fair_value_gaps || {};
+    [...(fvg.bullish || []), ...(fvg.bearish || [])].forEach(addFvgBand);
   }
 
   if (isLayerVisible("liquiditySweeps")) {
