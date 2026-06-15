@@ -197,6 +197,10 @@ Demand holds/reclaims and supply holds/rejections are early reversal-watch conte
 - A failed zone is invalidated context and should not be trusted as support or resistance.
 - Zone reactions must never create PLAN_READY or an entry marker by themselves.
 
+## Chart Line Audit Context
+
+The chart-line audit is deterministic, read-only context that explains where plotted indicators, levels, zones, reactions, sweeps, and confirmation triggers came from. Use its source, reason, status, confidence, and priority fields to explain which levels matter and which are muted or failed. It must never create a setup, override backend gates, or be treated as a standalone entry signal.
+
 ## 4. Price Action and Trend Principles
 
 ### Trend Continuation

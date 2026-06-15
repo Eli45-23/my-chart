@@ -4318,6 +4318,231 @@ def candle_direction(candle):
     return "neutral"
 
 
+def build_chart_line_registry(snapshot, symbol, timeframe):
+    snapshot = snapshot or {}
+    symbol = normalize_symbol(symbol)
+    current_price = snapshot.get("current_price")
+    chart_lines = []
+    warnings = []
+
+    def numeric(value):
+        return isinstance(value, (int, float)) and math.isfinite(value)
+
+    def add(
+        line_type,
+        label,
+        short_label,
+        source,
+        calculation_method,
+        reason,
+        price=None,
+        top=None,
+        bottom=None,
+        defended_edge=None,
+        failure_edge=None,
+        start_time=None,
+        end_time=None,
+        confidence=None,
+        strength="UNKNOWN",
+        status="ACTIVE",
+        priority=2,
+        clean=True,
+        full=True,
+        item_warnings=None,
+    ):
+        values = [value for value in [price, top, bottom] if numeric(value)]
+        if not values:
+            warnings.append(f"{label}: missing numeric price or range.")
+            return
+        if top is not None and bottom is not None and numeric(top) and numeric(bottom) and top < bottom:
+            top, bottom = bottom, top
+        anchor = price if numeric(price) else ((top + bottom) / 2 if numeric(top) and numeric(bottom) else values[0])
+        slug = re.sub(r"[^a-z0-9]+", "-", f"{symbol}-{timeframe}-{line_type}-{label}-{anchor}".lower()).strip("-")
+        chart_lines.append({
+            "id": slug,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "type": line_type,
+            "label": label,
+            "short_label": short_label,
+            "price": round_price(price) if numeric(price) else None,
+            "top": round_price(top) if numeric(top) else None,
+            "bottom": round_price(bottom) if numeric(bottom) else None,
+            "defended_edge": round_price(defended_edge) if numeric(defended_edge) else None,
+            "failure_edge": round_price(failure_edge) if numeric(failure_edge) else None,
+            "start_time": start_time,
+            "end_time": end_time,
+            "source": source,
+            "calculation_method": calculation_method,
+            "reason": reason,
+            "confidence": int(max(0, min(100, confidence))) if numeric(confidence) else None,
+            "strength": strength if strength in {"A", "B", "C", "WEAK", "UNKNOWN"} else "UNKNOWN",
+            "status": status if status in {"ACTIVE", "TESTED", "HOLDING", "FAILED", "MUTED", "UNKNOWN"} else "UNKNOWN",
+            "priority": priority if priority in {1, 2, 3} else 3,
+            "visible_in_clean_mode": bool(clean),
+            "visible_in_full_mode": bool(full),
+            "warnings": list(item_warnings or []),
+            "read_only": True,
+        })
+
+    levels = snapshot.get("levels") or {}
+    level_specs = [
+        ("pmh", "PMH", "premarket_high_low", "Maximum high from selected-day premarket candles", "Selected-day premarket high"),
+        ("pml", "PML", "premarket_high_low", "Minimum low from selected-day premarket candles", "Selected-day premarket low"),
+        ("pdh", "PDH", "previous_regular_session", "Maximum high from previous regular session", "Previous regular-session high"),
+        ("pdl", "PDL", "previous_regular_session", "Minimum low from previous regular session", "Previous regular-session low"),
+        ("pdc", "PDC", "previous_regular_session", "Final close from previous regular session", "Previous regular-session close"),
+    ]
+    for key, label, source, method, reason in level_specs:
+        add(label, label, label, source, method, reason, price=levels.get(key), priority=1)
+
+    indicators = snapshot.get("indicators") or {}
+    for key, line_type, label, period in [
+        ("vwap", "VWAP", "VWAP", None),
+        ("ema9", "EMA9", "EMA 9", 9),
+        ("ema20", "EMA20", "EMA 20", 20),
+    ]:
+        value = latest_indicator_value(indicators.get(key))
+        method = "Session cumulative volume-weighted average price" if key == "vwap" else f"Exponential moving average over {period} candles"
+        add(line_type, label, label, "session_vwap" if key == "vwap" else "ema_calculation", method, f"Latest {label} value", price=value, priority=1)
+
+    support_resistance = snapshot.get("support_resistance") or {}
+    for side, line_type, short in [("support", "SUPPORT", "Support"), ("resistance", "RESISTANCE", "Resistance")]:
+        for item in support_resistance.get(side, []) or []:
+            grade = item.get("quality_grade") or "UNKNOWN"
+            score = item.get("quality_score")
+            add(
+                line_type, f"{short} {grade}", short, "swing_detection",
+                "Weighted level quality from touches, reaction, freshness, confluence, distance, and cleanliness",
+                "; ".join(item.get("quality_reasons") or []) or f"Detected {side} swing level",
+                price=item.get("price"), confidence=score, strength=grade,
+                status="MUTED" if grade == "WEAK" else "ACTIVE",
+                priority=2 if grade in {"A", "B"} else 3, clean=grade in {"A", "B"},
+                item_warnings=item.get("warnings") or [],
+            )
+
+    supply_demand = snapshot.get("supply_demand") or {}
+    for side, zone_type, short in [("demand", "DEMAND_ZONE", "Demand"), ("supply", "SUPPLY_ZONE", "Supply")]:
+        for zone in supply_demand.get(side, []) or []:
+            grade = zone.get("zone_quality_grade") or "UNKNOWN"
+            reaction = zone.get("reaction_status")
+            failed = reaction == "FAILED"
+            status = "FAILED" if failed else "HOLDING" if reaction in {"HOLD", "RECLAIM", "REJECTION"} else "ACTIVE"
+            add(
+                zone_type, f"{short} Zone {grade}", short, "supply_demand_engine",
+                "Deterministic supply/demand zone detection and quality scoring",
+                "; ".join(zone.get("zone_quality_reasons") or []) or f"Detected {side} zone",
+                top=zone.get("high"), bottom=zone.get("low"), start_time=zone.get("time"),
+                defended_edge=zone.get("defended_edge"), failure_edge=zone.get("failure_edge"),
+                confidence=zone.get("zone_quality_score"), strength=grade, status=status,
+                priority=2 if grade in {"A", "B"} else 3,
+                clean=not failed and grade in {"A", "B"} and reaction in {"HOLD", "RECLAIM", "REJECTION"},
+                item_warnings=zone.get("reaction_warnings") or [],
+            )
+            if reaction in {"HOLD", "RECLAIM", "REJECTION", "FAILED"}:
+                reaction_type = f"{side.upper()}_{reaction}"
+                reaction_label = zone.get("reaction_label") or reaction_type.replace("_", " ").title()
+                add(
+                    reaction_type, reaction_label, reaction_label.title().replace("Rejection", "Reject"),
+                    "zone_reaction_engine", "Zone touch, close, defended-edge, and failure-edge evaluation",
+                    f"{zone.get('touches_count', 0)} touches; {zone.get('closes_holding_edge', 0)} closes holding defended edge",
+                    price=zone.get("defended_edge") if not failed else zone.get("failure_edge"),
+                    top=zone.get("high"), bottom=zone.get("low"), start_time=zone.get("last_reaction_time"),
+                    defended_edge=zone.get("defended_edge"), failure_edge=zone.get("failure_edge"),
+                    confidence=zone.get("reaction_confidence"), strength=grade,
+                    status="FAILED" if failed else "HOLDING", priority=1 if not failed else 3,
+                    clean=not failed, item_warnings=zone.get("reaction_warnings") or [],
+                )
+            for field, suffix, line_type in [
+                ("trigger", "Trigger", "ZONE_TRIGGER"),
+                ("invalidation", "Invalidation", "ZONE_INVALIDATION"),
+            ]:
+                if numeric(zone.get(field)):
+                    add(
+                        line_type, f"{short} {suffix}", f"{short} {suffix}",
+                        "supply_demand_engine", f"Deterministic {side} zone {field}",
+                        f"{short} zone {field} derived from zone boundaries",
+                        price=zone.get(field), confidence=zone.get("zone_quality_score"), strength=grade,
+                        status="MUTED" if failed else "ACTIVE", priority=3, clean=False,
+                    )
+
+    sweeps = snapshot.get("liquidity_sweeps") or {}
+    for side in ["upside", "downside"]:
+        for sweep in sweeps.get(side, []) or []:
+            add(
+                "LIQUIDITY_SWEEP", f"{side.title()} Liquidity Sweep", "Sweep",
+                "liquidity_sweep_engine", "Watch area around deterministic level or zone boundary",
+                sweep.get("source") or f"{side} liquidity sweep watch",
+                price=sweep.get("price"), top=sweep.get("high"), bottom=sweep.get("low"),
+                confidence=60, status="TESTED", priority=3, clean=False,
+                item_warnings=[sweeps.get("note")] if sweeps.get("note") else [],
+            )
+
+    structure_reactions = snapshot.get("structure_reactions") or {}
+    for side, short in [("support_watch", "Support Watch"), ("resistance_watch", "Resistance Watch")]:
+        for reaction in structure_reactions.get(side, []) or []:
+            add(
+                "STRUCTURE_REACTION", short, short, "structure_reaction_engine",
+                "Recent wick, touch, reaction, and follow-through watch-area detection",
+                reaction.get("reason") or short,
+                top=reaction.get("high"), bottom=reaction.get("low"), start_time=reaction.get("time"),
+                confidence=reaction.get("score"), status="TESTED", priority=3, clean=False,
+            )
+
+    for cluster in (snapshot.get("level_clusters") or {}).get("clusters", []) or []:
+        add(
+            "LEVEL_CLUSTER", cluster.get("label") or "Level Cluster", "Cluster", "level_cluster_engine",
+            "Merged nearby deterministic levels, zones, and liquidity watch areas",
+            cluster.get("cluster_type") or "Multiple nearby chart references",
+            top=cluster.get("high"), bottom=cluster.get("low"), confidence=cluster.get("score"),
+            status="ACTIVE", priority=3, clean=False,
+        )
+
+    for setup in (snapshot.get("confirmation_setups") or {}).get("setups", []) or []:
+        direction = setup.get("direction")
+        stage = setup.get("confirmation_stage") or setup.get("status") or "UNKNOWN"
+        short = "Breakout Trigger" if direction == "bullish" else "Breakdown Trigger"
+        add(
+            "CONFIRMATION_TRIGGER", f"{short} · {stage}", short, "confirmation_setup_engine",
+            "Confirmation setup trigger/reclaim/rejection level",
+            "; ".join(setup.get("confirmation_reasons") or []) or f"{stage} {direction or ''} confirmation setup",
+            price=setup.get("trigger") if numeric(setup.get("trigger")) else setup.get("level_price"),
+            start_time=setup.get("candle_time"), confidence=setup.get("confirmation_score"),
+            strength=setup.get("professional_grade") if setup.get("professional_grade") in {"A", "B", "C"} else "UNKNOWN",
+            status="FAILED" if stage == "FAILED" or setup.get("status") == "INVALIDATED" else "ACTIVE",
+            priority=1 if stage == "CONFIRMED" else 2, clean=stage == "CONFIRMED",
+            item_warnings=setup.get("confirmation_warnings") or [],
+        )
+        if numeric(setup.get("invalidation")):
+            add(
+                "CONFIRMATION_INVALIDATION", f"{short} Invalidation", "Setup Invalid",
+                "confirmation_setup_engine", "Confirmation setup invalidation level",
+                "Price beyond this level invalidates the confirmation setup.",
+                price=setup.get("invalidation"), start_time=setup.get("candle_time"),
+                confidence=setup.get("confirmation_score"), status="ACTIVE", priority=3, clean=False,
+                item_warnings=setup.get("confirmation_warnings") or [],
+            )
+
+    deduplicated = {}
+    for line in chart_lines:
+        key = (line["label"], line["price"], line["top"], line["bottom"])
+        existing = deduplicated.get(key)
+        if not existing or (line["priority"], -(line["confidence"] or 0)) < (existing["priority"], -(existing["confidence"] or 0)):
+            deduplicated[key] = line
+        if line["type"] == "UNKNOWN":
+            warnings.append(f"{line['label']}: unknown type.")
+    chart_lines = list(deduplicated.values())
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "line_count": len(chart_lines),
+        "chart_lines": chart_lines,
+        "warnings": list(dict.fromkeys(warnings)),
+        "read_only": True,
+    }
+
+
 def price_relation(price, reference):
     if price is None or reference is None:
         return "unknown"
@@ -4553,6 +4778,7 @@ def compact_intraday_ai_context(payload):
     )
     support_resistance = payload.get("support_resistance") or {}
     supply_demand = payload.get("supply_demand") or {}
+    chart_lines = payload.get("chart_lines") or []
     zone_reactions = [
         {
             "type": zone.get("type"),
@@ -4597,6 +4823,24 @@ def compact_intraday_ai_context(payload):
         "risk_reward": compact_risk_reward(best_setup.get("risk_reward")) if best_setup else None,
         "volume_context": build_ai_volume_context(candles, best_setup),
         "zone_reactions": zone_reactions,
+        "chart_line_audit": [
+            {
+                "type": line.get("type"),
+                "short_label": line.get("short_label"),
+                "price": line.get("price"),
+                "top": line.get("top"),
+                "bottom": line.get("bottom"),
+                "source": line.get("source"),
+                "reason": line.get("reason"),
+                "confidence": line.get("confidence"),
+                "strength": line.get("strength"),
+                "status": line.get("status"),
+                "priority": line.get("priority"),
+                "read_only": True,
+            }
+            for line in chart_lines
+            if line.get("priority") in {1, 2}
+        ][:16],
         "warnings": list(dict.fromkeys(
             (confirmation_setups.get("quality_warnings") or [])
             + (professional_context.get("warnings") or [])
@@ -6199,7 +6443,7 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
             logged_setups = 0
             setup_outcomes = []
 
-        return jsonify({
+        chart_snapshot = {
             "symbol": active_symbol,
             "active_symbol": active_symbol,
             "related_market_symbols": get_related_market_symbols(active_symbol),
@@ -6239,7 +6483,11 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
             "indicators": indicators,
             "data_status": "ok",
             "errors": [],
-        })
+        }
+        chart_line_audit = build_chart_line_registry(chart_snapshot, active_symbol, timeframe)
+        chart_snapshot["chart_lines"] = chart_line_audit["chart_lines"]
+        chart_snapshot["chart_line_warnings"] = chart_line_audit["warnings"]
+        return jsonify(chart_snapshot)
     except Exception as e:
         return jsonify({
             "symbol": active_symbol,
@@ -6264,6 +6512,8 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
             "confirmation_setups": {"status": "ERROR", "trend": {}, "setups": [], "meta": {"read_only": True}},
             "professional_context": {"professional_grade": "ERROR", "warnings": ["chart error"], "read_only": True},
             "indicators": {},
+            "chart_lines": [],
+            "chart_line_warnings": ["Chart data unavailable; no plotted lines were registered."],
             "data_status": "error",
             "errors": [str(e)],
         }), 500
@@ -6274,6 +6524,24 @@ def ai_chart_snapshot():
     timeframe = request.args.get("timeframe", "5Min")
     symbol = request.args.get("symbol", SYMBOL)
     return jsonify(build_ai_chart_snapshot(timeframe, symbol))
+
+
+@APP.route("/api/debug/chart-lines")
+def debug_chart_lines():
+    symbol = request.args.get("symbol", SYMBOL)
+    timeframe = request.args.get("timeframe", "5Min")
+    response = chart_data(timeframe_override=timeframe, include_logging=False, symbol_override=symbol)
+    if isinstance(response, tuple):
+        response = response[0]
+    payload = response.get_json() or {}
+    return jsonify({
+        "symbol": payload.get("symbol", normalize_symbol(symbol)),
+        "timeframe": payload.get("timeframe", timeframe),
+        "line_count": len(payload.get("chart_lines") or []),
+        "chart_lines": payload.get("chart_lines") or [],
+        "warnings": payload.get("chart_line_warnings") or [],
+        "read_only": True,
+    })
 
 
 @APP.route("/api/ai/latest-review")

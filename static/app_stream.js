@@ -12,6 +12,12 @@ const symbolInput = document.getElementById("symbolInput");
 const loadSymbolButton = document.getElementById("loadSymbolButton");
 const chartTitleEl = document.getElementById("chartTitle");
 const chartSubtitleEl = document.getElementById("chartSubtitle");
+const lineAuditToggle = document.getElementById("lineAuditToggle");
+const lineAuditPanel = document.getElementById("lineAuditPanel");
+const lineAuditClose = document.getElementById("lineAuditClose");
+const lineAuditList = document.getElementById("lineAuditList");
+const lineAuditMeta = document.getElementById("lineAuditMeta");
+const lineAuditDetail = document.getElementById("lineAuditDetail");
 
 const CLEAN_MODE_STORAGE_KEY = "aaplChartCleanMode";
 let cleanMode = true;
@@ -73,6 +79,7 @@ let eventSource = null;
 let didInitialLoad = false;
 let latestPayload = null;
 let aiEntryPriceLine = null;
+let labeledPrices = [];
 
 const timeframeSeconds = {
   "1Min": 60,
@@ -248,7 +255,7 @@ function updateCleanModeControl() {
 function applyIndicatorVisibility() {
   vwapSeries.applyOptions({ visible: layerState.vwap });
   ema9Series.applyOptions({ visible: layerState.emas });
-  ema20Series.applyOptions({ visible: layerState.emas && !cleanMode });
+  ema20Series.applyOptions({ visible: layerState.emas });
 }
 
 function clearPriceLines() {
@@ -256,6 +263,7 @@ function clearPriceLines() {
     candleSeries.removePriceLine(line);
   }
   priceLines = [];
+  labeledPrices = [];
 }
 
 function removeAiEntryMarker() {
@@ -315,15 +323,33 @@ async function refreshAiEntryMarker() {
   }
 }
 
+function visibleAuditLines() {
+  return (latestPayload?.chart_lines || []).filter(line =>
+    cleanMode ? line.visible_in_clean_mode : line.visible_in_full_mode
+  );
+}
+
+function smartLabelForPrice(price, fallback) {
+  const match = visibleAuditLines()
+    .filter(line => Number.isFinite(Number(line.price)) && Math.abs(Number(line.price) - Number(price)) < 0.006)
+    .sort((a, b) => (a.priority || 3) - (b.priority || 3))[0];
+  return match?.short_label || fallback;
+}
+
 function addLevel(label, price, color, style = LightweightCharts.LineStyle.Solid, showLabel = true, lineWidth = 1) {
   if (price === null || price === undefined) return;
+  const numericPrice = Number(price);
+  const overlapsLabel = labeledPrices.some(value => Math.abs(value - numericPrice) < 0.018);
+  const labelVisible = showLabel && !overlapsLabel;
+  if (labelVisible) labeledPrices.push(numericPrice);
+  const smartLabel = smartLabelForPrice(numericPrice, label);
   const line = candleSeries.createPriceLine({
-    price,
+    price: numericPrice,
     color,
     lineWidth,
     lineStyle: style,
-    axisLabelVisible: showLabel,
-    title: showLabel ? `${label} ${Number(price).toFixed(2)}` : "",
+    axisLabelVisible: labelVisible,
+    title: labelVisible ? smartLabel : "",
   });
   priceLines.push(line);
 }
@@ -425,6 +451,49 @@ function textPill(text, tone = "") {
   return `<span class="pill ${tone}">${text}</span>`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, character => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;",
+  }[character]));
+}
+
+function linePriceText(line) {
+  if (line.price !== null && line.price !== undefined && Number.isFinite(Number(line.price))) return Number(line.price).toFixed(2);
+  if (line.bottom !== null && line.bottom !== undefined && line.top !== null && line.top !== undefined &&
+      Number.isFinite(Number(line.bottom)) && Number.isFinite(Number(line.top))) {
+    return `${Number(line.bottom).toFixed(2)}-${Number(line.top).toFixed(2)}`;
+  }
+  return "n/a";
+}
+
+function renderLineAudit(selectedId = null) {
+  if (!lineAuditList) return;
+  const lines = visibleAuditLines().sort((a, b) =>
+    (a.priority || 3) - (b.priority || 3) || String(a.short_label).localeCompare(String(b.short_label))
+  );
+  lineAuditMeta.textContent = `${activeSymbol} · ${activeTimeframe} · ${lines.length} visible deterministic items`;
+  lineAuditList.innerHTML = lines.map(line => `
+    <div class="audit-item ${line.status === "FAILED" || line.status === "MUTED" ? "muted" : ""} ${line.id === selectedId ? "selected" : ""}" data-line-id="${escapeHtml(line.id)}" title="${escapeHtml(line.reason)}">
+      <div class="audit-row"><span class="audit-label">${escapeHtml(line.short_label)}</span><span>${escapeHtml(linePriceText(line))}</span></div>
+      <div class="audit-row audit-sub"><span>${escapeHtml(line.type)}</span><span>${escapeHtml(line.status)} · P${escapeHtml(line.priority)}</span></div>
+    </div>
+  `).join("") || `<div class="audit-meta">No visible registered lines for the current mode.</div>`;
+  const selected = lines.find(line => line.id === selectedId);
+  lineAuditDetail.classList.toggle("visible", Boolean(selected));
+  lineAuditDetail.innerHTML = selected ? `
+    <strong>${escapeHtml(selected.label)}</strong><br>
+    Price / range: ${escapeHtml(linePriceText(selected))}<br>
+    Source: ${escapeHtml(selected.source)}<br>
+    Method: ${escapeHtml(selected.calculation_method)}<br>
+    Reason: ${escapeHtml(selected.reason)}<br>
+    Status: ${escapeHtml(selected.status)} · Strength: ${escapeHtml(selected.strength)} · Confidence: ${escapeHtml(selected.confidence ?? "n/a")}%<br>
+    Defended edge: ${escapeHtml(selected.defended_edge ?? "n/a")} · Failure edge: ${escapeHtml(selected.failure_edge ?? "n/a")}<br>
+    Timeframe: ${escapeHtml(selected.timeframe)}<br>
+    Warnings: ${escapeHtml((selected.warnings || []).join(" | ") || "none")}<br>
+    Read-only chart context.
+  ` : "";
+}
+
 function legendGroup(title, items, className = "") {
   return `<section class="legend-group ${className}"><span class="legend-group-title">${title}</span><div class="legend-pills">${items.filter(Boolean).join("")}</div></section>`;
 }
@@ -522,6 +591,7 @@ function updateCountdown() {
 function updateLegend(data) {
   latestPayload = data || latestPayload;
   if (!latestPayload) return;
+  renderLineAudit();
 
   const levels = latestPayload.levels || {};
   const indicators = latestPayload.indicators || {};
@@ -751,6 +821,7 @@ async function loadInitialChart() {
     throw new Error((data.errors || ["Unknown error"]).join(", "));
   }
 
+  latestPayload = data;
   candleSeries.setData(data.candles || []);
   updateChartEmptyState(data.candles);
 
@@ -884,6 +955,25 @@ cleanModeToggle.addEventListener("click", () => {
   applyIndicatorVisibility();
 });
 
+lineAuditToggle.addEventListener("click", () => {
+  const visible = !lineAuditPanel.classList.contains("visible");
+  lineAuditPanel.classList.toggle("visible", visible);
+  lineAuditToggle.classList.toggle("active", visible);
+  lineAuditToggle.setAttribute("aria-pressed", String(visible));
+  if (visible) renderLineAudit();
+});
+
+lineAuditClose.addEventListener("click", () => {
+  lineAuditPanel.classList.remove("visible");
+  lineAuditToggle.classList.remove("active");
+  lineAuditToggle.setAttribute("aria-pressed", "false");
+});
+
+lineAuditList.addEventListener("click", event => {
+  const item = event.target.closest("[data-line-id]");
+  if (item) renderLineAudit(item.dataset.lineId);
+});
+
 window.addEventListener("resize", () => {
   chart.applyOptions({ width: chartEl.clientWidth });
 });
@@ -899,6 +989,7 @@ setInterval(() => {
       .then(r => r.json())
       .then(data => {
         if (data.data_status === "ok") {
+          latestPayload = data;
           const indicators = data.indicators || {};
           vwapSeries.setData(indicators.vwap || []);
           ema9Series.setData(indicators.ema9 || []);

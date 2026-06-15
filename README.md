@@ -175,6 +175,14 @@ These labels are watch context only. They are not trade signals and cannot creat
 
 Strong reactions such as demand reclaims and supply rejections are preserved while later candles continue respecting the defended edge.
 
+## Chart Line Audit
+
+The deterministic Chart Line Audit registers existing plotted indicators, levels, zones, reactions, liquidity sweeps, and confirmation triggers with their source, calculation method, reason, status, confidence, priority, and Clean Mode visibility.
+
+- Open **Line Audit** on the main chart to inspect visible items.
+- Use `/api/debug/chart-lines?symbol=AAPL&timeframe=5Min` for the structured debug payload.
+- The audit never invents levels, creates setups, or changes entry-marker eligibility.
+
 ## AI Trade Review
 
 AI Trade Review is a read-only review assistant. It uses structured chart data, market context, risk rules, and the trading playbook to explain possible setups.
