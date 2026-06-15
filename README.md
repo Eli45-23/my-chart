@@ -183,6 +183,8 @@ The deterministic Chart Line Audit registers existing plotted indicators, levels
 - Use `/api/debug/chart-lines?symbol=AAPL&timeframe=5Min` for the structured debug payload.
 - The audit never invents levels, creates setups, or changes entry-marker eligibility.
 
+Clean Mode 2.0 uses audit metadata to show only nearby, actionable context. VWAP, EMA9, EMA20, current price, nearby major session levels, active zone reactions, and confirmed setup triggers remain visible. Failed, weak, distant, low-priority, invalid, and duplicate nearby research lines are hidden. Full Mode retains broader deterministic context with weak and failed items visually muted.
+
 ## AI Trade Review
 
 AI Trade Review is a read-only review assistant. It uses structured chart data, market context, risk rules, and the trading playbook to explain possible setups.

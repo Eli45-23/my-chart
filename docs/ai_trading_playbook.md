@@ -201,6 +201,8 @@ Demand holds/reclaims and supply holds/rejections are early reversal-watch conte
 
 The chart-line audit is deterministic, read-only context that explains where plotted indicators, levels, zones, reactions, sweeps, and confirmation triggers came from. Use its source, reason, status, confidence, and priority fields to explain which levels matter and which are muted or failed. It must never create a setup, override backend gates, or be treated as a standalone entry signal.
 
+Clean Mode visibility is a presentation filter only. Hidden weak, failed, distant, duplicate, or research-only lines still exist in deterministic backend context and must not be interpreted as deleted calculations.
+
 ## 4. Price Action and Trend Principles
 
 ### Trend Continuation

@@ -222,17 +222,63 @@ function isWeakZone(zone) {
   return zone?.zone_quality_grade === "WEAK" || (zone?.label || "").includes("Weak Zone");
 }
 
+function lineAnchorPrice(line) {
+  if (line?.price !== null && line?.price !== undefined && Number.isFinite(Number(line.price))) return Number(line.price);
+  if (line?.top !== null && line?.top !== undefined && line?.bottom !== null && line?.bottom !== undefined &&
+      Number.isFinite(Number(line.top)) && Number.isFinite(Number(line.bottom))) {
+    return (Number(line.top) + Number(line.bottom)) / 2;
+  }
+  return null;
+}
+
+function isLineNearCurrentPrice(line, currentPrice, symbol = activeSymbol) {
+  const anchor = lineAnchorPrice(line);
+  const price = Number(currentPrice);
+  if (!Number.isFinite(anchor) || !Number.isFinite(price) || price <= 0) return false;
+  const etfs = new Set(["SPY", "QQQ", "IWM", "DIA"]);
+  const maxPercent = etfs.has(String(symbol).toUpperCase()) ? 0.006 : 0.0075;
+  return Math.abs(anchor - price) / price <= maxPercent;
+}
+
+function isValidAuditLine(line) {
+  return Boolean(
+    line?.id && line?.type && line?.label && line?.source && line?.reason && line?.status &&
+    [1, 2, 3].includes(line?.priority) && Number.isFinite(lineAnchorPrice(line))
+  );
+}
+
+function lineDisplayDecision(line) {
+  if (!isValidAuditLine(line)) return { visible: false, hiddenReason: "invalid audit metadata" };
+  if (!line.visible_in_full_mode) return { visible: false, hiddenReason: "not visible in full mode" };
+  if (!cleanMode) return { visible: true, hiddenReason: null };
+
+  const alwaysVisible = new Set(["VWAP", "EMA9", "EMA20"]);
+  if (alwaysVisible.has(line.type)) return { visible: true, hiddenReason: null };
+  if (!line.source || !line.reason) return { visible: false, hiddenReason: "no valid source" };
+  if (line.status === "FAILED") return { visible: false, hiddenReason: "failed" };
+  if (line.strength === "WEAK") return { visible: false, hiddenReason: "weak" };
+  if (line.priority === 3) return { visible: false, hiddenReason: "low priority" };
+  if (!line.visible_in_clean_mode) return { visible: false, hiddenReason: "not actionable in Clean Mode" };
+  if (!isLineNearCurrentPrice(line, latestPayload?.current_price || latestPayload?.latest_trade?.price, activeSymbol)) {
+    return { visible: false, hiddenReason: "distant" };
+  }
+  const anchor = lineAnchorPrice(line);
+  const duplicateNearby = (latestPayload?.chart_lines || []).some(other =>
+    other.id !== line.id && isValidAuditLine(other) && (other.priority || 3) < (line.priority || 3) &&
+    Number.isFinite(lineAnchorPrice(other)) && Math.abs(lineAnchorPrice(other) - anchor) < 0.025
+  );
+  if (duplicateNearby) return { visible: false, hiddenReason: "duplicate nearby level" };
+  return { visible: true, hiddenReason: null };
+}
+
 function chartSupplyDemandZones(zones) {
   const available = zones || [];
 
   if (cleanMode) {
     const currentPrice = latestPayload?.current_price || latestPayload?.latest_trade?.price;
-    const nearDistance = currentPrice ? Math.max(0.5, Number(currentPrice) * 0.003) : Infinity;
     return available.filter(zone => {
       if (!["HOLD", "RECLAIM", "REJECTION"].includes(zone.reaction_status)) return false;
-      if (currentPrice === null || currentPrice === undefined) return true;
-      const mid = (Number(zone.low) + Number(zone.high)) / 2;
-      return Math.abs(mid - Number(currentPrice)) <= nearDistance;
+      return isLineNearCurrentPrice({ top: zone.high, bottom: zone.low }, currentPrice, activeSymbol);
     });
   }
 
@@ -253,9 +299,12 @@ function updateCleanModeControl() {
 }
 
 function applyIndicatorVisibility() {
-  vwapSeries.applyOptions({ visible: layerState.vwap });
-  ema9Series.applyOptions({ visible: layerState.emas });
-  ema20Series.applyOptions({ visible: layerState.emas });
+  const auditTypeVisible = type => (latestPayload?.chart_lines || []).some(line =>
+    line.type === type && lineDisplayDecision(line).visible
+  );
+  vwapSeries.applyOptions({ visible: layerState.vwap && auditTypeVisible("VWAP"), lineWidth: 2 });
+  ema9Series.applyOptions({ visible: layerState.emas && auditTypeVisible("EMA9"), lineWidth: cleanMode ? 2 : 1 });
+  ema20Series.applyOptions({ visible: layerState.emas && auditTypeVisible("EMA20"), lineWidth: 1 });
 }
 
 function clearPriceLines() {
@@ -324,30 +373,54 @@ async function refreshAiEntryMarker() {
 }
 
 function visibleAuditLines() {
-  return (latestPayload?.chart_lines || []).filter(line =>
-    cleanMode ? line.visible_in_clean_mode : line.visible_in_full_mode
-  );
+  return (latestPayload?.chart_lines || []).filter(line => lineDisplayDecision(line).visible);
 }
 
-function smartLabelForPrice(price, fallback) {
-  const match = visibleAuditLines()
-    .filter(line => Number.isFinite(Number(line.price)) && Math.abs(Number(line.price) - Number(price)) < 0.006)
-    .sort((a, b) => (a.priority || 3) - (b.priority || 3))[0];
-  return match?.short_label || fallback;
+function findAuditLineForPlot(label, price) {
+  const numericPrice = Number(price);
+  const words = String(label || "").toUpperCase().split(/[^A-Z0-9]+/).filter(word => word.length > 2);
+  return (latestPayload?.chart_lines || [])
+    .filter(line => {
+      const values = [line.price, line.top, line.bottom].filter(value => value !== null && value !== undefined).map(Number);
+      const anchor = lineAnchorPrice(line);
+      return values.some(value => Number.isFinite(value) && Math.abs(value - numericPrice) < 0.011) ||
+        (Number.isFinite(anchor) && Math.abs(anchor - numericPrice) < 0.011);
+    })
+    .sort((a, b) => {
+      const aWords = `${a.type} ${a.label} ${a.short_label}`.toUpperCase();
+      const bWords = `${b.type} ${b.label} ${b.short_label}`.toUpperCase();
+      const aMatch = words.filter(word => aWords.includes(word)).length;
+      const bMatch = words.filter(word => bWords.includes(word)).length;
+      return bMatch - aMatch || (a.priority || 3) - (b.priority || 3);
+    })[0] || null;
 }
 
 function addLevel(label, price, color, style = LightweightCharts.LineStyle.Solid, showLabel = true, lineWidth = 1) {
   if (price === null || price === undefined) return;
   const numericPrice = Number(price);
-  const overlapsLabel = labeledPrices.some(value => Math.abs(value - numericPrice) < 0.018);
-  const labelVisible = showLabel && !overlapsLabel;
-  if (labelVisible) labeledPrices.push(numericPrice);
-  const smartLabel = smartLabelForPrice(numericPrice, label);
+  const auditLine = findAuditLineForPlot(label, numericPrice);
+  if (!auditLine) return;
+  const decision = lineDisplayDecision(auditLine);
+  if (!decision.visible) return;
+
+  const priority = auditLine.priority || 3;
+  const strongerNearby = visibleAuditLines().some(line =>
+    line.id !== auditLine.id && (line.priority || 3) < priority &&
+    Math.abs(lineAnchorPrice(line) - numericPrice) < 0.025
+  );
+  const overlapsLabel = labeledPrices.some(item =>
+    Math.abs(item.price - numericPrice) < 0.022 && item.priority <= priority
+  );
+  const labelEligible = priority <= 2 && !["FAILED", "MUTED"].includes(auditLine.status) && auditLine.strength !== "WEAK";
+  const labelVisible = showLabel && labelEligible && !strongerNearby && !overlapsLabel;
+  if (labelVisible) labeledPrices.push({ price: numericPrice, priority });
+  const muted = !cleanMode && (priority === 3 || ["FAILED", "MUTED"].includes(auditLine.status) || auditLine.strength === "WEAK");
+  const smartLabel = auditLine.short_label || label;
   const line = candleSeries.createPriceLine({
     price: numericPrice,
-    color,
-    lineWidth,
-    lineStyle: style,
+    color: muted ? `${color}55` : color,
+    lineWidth: priority === 1 && !muted ? Math.max(1, lineWidth) : 1,
+    lineStyle: muted ? LightweightCharts.LineStyle.Dotted : style,
     axisLabelVisible: labelVisible,
     title: labelVisible ? smartLabel : "",
   });
@@ -368,6 +441,14 @@ function addZoneBand(label, zone, colors) {
   const weak = zone.zone_quality_grade === "WEAK" || failed;
   const zoneColor = failed ? COLORS.failedZone : colors.zone;
   const style = weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed;
+
+  if (cleanMode) {
+    if (zone.reaction_label && !failed) {
+      const reactionColor = zone.type === "demand" ? COLORS.demandReaction : COLORS.supplyReaction;
+      addLevel(zone.reaction_label, zone.defended_edge, reactionColor, LightweightCharts.LineStyle.Solid, true, 2);
+    }
+    return;
+  }
 
   addLevel(`${label} High ${quality}`, high, zoneColor, LightweightCharts.LineStyle.Dotted, false);
   addLevel(`${label} Low ${quality}`, low, zoneColor, LightweightCharts.LineStyle.Dotted, false);
@@ -468,21 +549,28 @@ function linePriceText(line) {
 
 function renderLineAudit(selectedId = null) {
   if (!lineAuditList) return;
-  const lines = visibleAuditLines().sort((a, b) =>
+  const lines = (latestPayload?.chart_lines || []).sort((a, b) =>
     (a.priority || 3) - (b.priority || 3) || String(a.short_label).localeCompare(String(b.short_label))
   );
-  lineAuditMeta.textContent = `${activeSymbol} · ${activeTimeframe} · ${lines.length} visible deterministic items`;
-  lineAuditList.innerHTML = lines.map(line => `
-    <div class="audit-item ${line.status === "FAILED" || line.status === "MUTED" ? "muted" : ""} ${line.id === selectedId ? "selected" : ""}" data-line-id="${escapeHtml(line.id)}" title="${escapeHtml(line.reason)}">
+  const visibleCount = lines.filter(line => lineDisplayDecision(line).visible).length;
+  lineAuditMeta.textContent = `${activeSymbol} · ${activeTimeframe} · ${visibleCount}/${lines.length} visible deterministic items`;
+  lineAuditList.innerHTML = lines.map(line => {
+    const decision = lineDisplayDecision(line);
+    return `
+    <div class="audit-item ${!decision.visible || line.status === "FAILED" || line.status === "MUTED" ? "muted" : ""} ${line.id === selectedId ? "selected" : ""}" data-line-id="${escapeHtml(line.id)}" title="${escapeHtml(line.reason)}">
       <div class="audit-row"><span class="audit-label">${escapeHtml(line.short_label)}</span><span>${escapeHtml(linePriceText(line))}</span></div>
-      <div class="audit-row audit-sub"><span>${escapeHtml(line.type)}</span><span>${escapeHtml(line.status)} · P${escapeHtml(line.priority)}</span></div>
+      <div class="audit-row audit-sub"><span>${escapeHtml(line.type)}</span><span>${decision.visible ? "Visible" : `Hidden: ${escapeHtml(decision.hiddenReason)}`} · P${escapeHtml(line.priority)}</span></div>
     </div>
-  `).join("") || `<div class="audit-meta">No visible registered lines for the current mode.</div>`;
+  `}).join("") || `<div class="audit-meta">No registered chart lines.</div>`;
   const selected = lines.find(line => line.id === selectedId);
+  const selectedDecision = selected ? lineDisplayDecision(selected) : null;
   lineAuditDetail.classList.toggle("visible", Boolean(selected));
   lineAuditDetail.innerHTML = selected ? `
     <strong>${escapeHtml(selected.label)}</strong><br>
     Price / range: ${escapeHtml(linePriceText(selected))}<br>
+    Visible in Clean Mode: ${selected.visible_in_clean_mode ? "Yes" : "No"}<br>
+    Current display: ${selectedDecision.visible ? "Visible" : `Hidden - ${escapeHtml(selectedDecision.hiddenReason)}`}<br>
+    Priority: ${escapeHtml(selected.priority)}<br>
     Source: ${escapeHtml(selected.source)}<br>
     Method: ${escapeHtml(selected.calculation_method)}<br>
     Reason: ${escapeHtml(selected.reason)}<br>
@@ -681,6 +769,7 @@ function addConfirmationSetup(label, setup) {
   let style = LightweightCharts.LineStyle.Dashed;
   const stage = setup.confirmation_stage || setup.status || "WATCH";
   const stageLabel = stage === "EARLY_CONFIRM" ? "EARLY" : stage;
+  if (cleanMode && stage !== "CONFIRMED") return;
 
   if (stage === "CONFIRMED") {
     color = COLORS.confirmationConfirmed;
@@ -694,7 +783,7 @@ function addConfirmationSetup(label, setup) {
 
   addLevel(
     `${stageLabel} ${String(setup.direction || "").toUpperCase()} ${setup.source || label} RR ${setup.risk_reward?.rr_grade || "n/a"} R1 ${setup.risk_reward?.rr_1 ?? "n/a"} R2 ${setup.risk_reward?.rr_2 ?? "n/a"}`,
-    price,
+    setup.trigger ?? price,
     color,
     style,
     true
