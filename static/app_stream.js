@@ -847,7 +847,7 @@ function updateLegend(data) {
     textPill(`Setup ${setupStatus}`, warningTone(setupStatus)),
     textPill(`Best ${latestPayload.confirmation_setups?.best_grade || bestSetup?.professional_grade || "NO_TRADE"} · ${bestSetup?.professional_score ?? bestSetup?.score ?? 0}`, warningTone(latestPayload.confirmation_setups?.best_grade || bestSetup?.professional_grade)),
     textPill(`Trend Filter ${latestPayload.confirmation_setups?.trend?.label || "n/a"}`),
-    textPill(`Setups ${setups.map(s => `${s.professional_grade || ""} ${s.confirmation_stage === "EARLY_CONFIRM" ? "EARLY" : (s.confirmation_stage || s.status)} · ${formatRiskReward(s, !cleanMode)}`).join(" || ") || "none"}`, warningTone(setupStatus)),
+    textPill(`Setups ${setups.map(s => `${s.setup_intent || s.setup_label || ""} ${s.professional_grade || ""} ${s.confirmation_stage === "EARLY_CONFIRM" ? "EARLY" : (s.confirmation_stage || s.status)} · ${formatRiskReward(s, !cleanMode)}`).join(" || ") || "none"}`, warningTone(setupStatus)),
   ];
   const warningText = (latestPayload.professional_context?.warnings || []).join(" | ") || "No active warnings";
   const riskItems = [
@@ -898,7 +898,10 @@ function addConfirmationSetup(label, setup) {
   let style = LightweightCharts.LineStyle.Dashed;
   const stage = setup.confirmation_stage || setup.status || "WATCH";
   const stageLabel = stage === "EARLY_CONFIRM" ? "EARLY" : stage;
+  const intent = setup.setup_intent || setup.setup_label || "";
+  const blocked = ["NO TRADE", "RESEARCH CONTEXT"].includes(intent);
   if (cleanMode && stage !== "CONFIRMED") return;
+  if (cleanMode && blocked) return;
 
   if (stage === "CONFIRMED") {
     color = COLORS.confirmationConfirmed;
@@ -911,7 +914,7 @@ function addConfirmationSetup(label, setup) {
   }
 
   addLevel(
-    `${stageLabel} ${String(setup.direction || "").toUpperCase()} ${setup.source || label} RR ${setup.risk_reward?.rr_grade || "n/a"} R1 ${setup.risk_reward?.rr_1 ?? "n/a"} R2 ${setup.risk_reward?.rr_2 ?? "n/a"}`,
+    `${intent ? `${intent} · ` : ""}${stageLabel} ${String(setup.direction || "").toUpperCase()} ${setup.source || label} RR ${setup.risk_reward?.rr_grade || "n/a"} R1 ${setup.risk_reward?.rr_1 ?? "n/a"} R2 ${setup.risk_reward?.rr_2 ?? "n/a"}`,
     setup.trigger ?? price,
     color,
     style,

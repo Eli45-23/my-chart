@@ -67,7 +67,7 @@ def empty_ai_review():
         "decision": "WAIT",
         "bias": "neutral",
         "confidence": 0,
-        "summary": f"No AI trade review has been requested yet. {AI_REVIEW_SAFETY_TEXT}",
+        "summary": f"No fresh AI review requested. {AI_REVIEW_SAFETY_TEXT}",
         "direct_answer": "No question has been asked yet.",
         "application_to_current_setup": "No current setup review is available.",
         "what_ai_sees": "No current review is available.",
@@ -87,7 +87,7 @@ def empty_ai_review():
             "label": "",
             "direction": "neutral",
         },
-        "warnings": ["No current review is available."],
+        "warnings": ["No fresh AI review requested."],
         "do_not_chase": AI_REVIEW_SAFETY_TEXT,
         "manual_confirmation_checklist": [
             "Confirm the setup manually.",
@@ -97,6 +97,7 @@ def empty_ai_review():
         "not_financial_advice": True,
         "not_an_order": True,
         "source": "fallback",
+        "ai_review_status": "No fresh AI review requested.",
         "snapshot_summary": {},
         "ai_review_recommended": False,
         "latest_event_reason": None,
@@ -2669,6 +2670,8 @@ def evaluate_setup_outcomes(symbol, timeframe, candles, confirmation_setups):
                 "setup_status": setup.get("status"),
                 "professional_grade": setup.get("professional_grade"),
                 "professional_score": setup.get("professional_score"),
+                "setup_intent": setup.get("setup_intent"),
+                "blocked_reasons": setup.get("blocked_reasons") or [],
                 "direction": direction,
                 "source": setup.get("source"),
                 "level_price": setup.get("level_price"),
@@ -2763,19 +2766,33 @@ def summarize_setup_performance(limit=500):
     buckets = {}
 
     for row in outcomes:
+        professional_grade = row.get("professional_grade")
+        setup_intent = row.get("setup_intent")
+        blocked_reasons = row.get("blocked_reasons") or []
+        performance_view = (
+            "tradable"
+            if professional_grade in {"A+", "A", "B", "C"}
+            and setup_intent not in {"NO TRADE", "RESEARCH CONTEXT"}
+            else "research"
+        )
         key = (
             row.get("timeframe"),
             row.get("horizon_candles"),
             row.get("direction"),
-            row.get("professional_grade"),
+            professional_grade,
             row.get("source"),
+            setup_intent,
+            performance_view,
         )
         bucket = buckets.setdefault(key, {
             "timeframe": row.get("timeframe"),
             "horizon_candles": row.get("horizon_candles"),
             "direction": row.get("direction"),
-            "professional_grade": row.get("professional_grade"),
+            "professional_grade": professional_grade,
             "source": row.get("source"),
+            "setup_intent": setup_intent or ("NO TRADE" if professional_grade == "NO_TRADE" else "WATCH ONLY"),
+            "blocked_reasons": blocked_reasons,
+            "performance_view": performance_view,
             "count": 0,
             "invalidated": 0,
             "avg_favorable_move": 0.0,
@@ -2786,6 +2803,7 @@ def summarize_setup_performance(limit=500):
 
         if row.get("invalidated_within_horizon"):
             bucket["invalidated"] += 1
+        bucket["blocked_reasons"] = list(dict.fromkeys((bucket.get("blocked_reasons") or []) + blocked_reasons))
 
         fav = row.get("max_favorable_move")
         adv = row.get("max_adverse_move")
@@ -3625,6 +3643,8 @@ def strict_trade_quality_grade(setup, professional_context):
         warnings.append("Underlying level/zone quality is weak.")
     elif active_quality_grade == "C":
         warnings.append("Underlying level/zone quality is only C grade.")
+    if uses_zone and setup.get("zone_previously_broken"):
+        warnings.append("Zone previously failed/broken.")
 
     hard_no_trade = (
         status == "INVALIDATED"
@@ -3637,6 +3657,7 @@ def strict_trade_quality_grade(setup, professional_context):
         or market_opposes
         or rr_grade == "BAD"
         or active_quality_grade == "WEAK"
+        or (uses_zone and setup.get("zone_previously_broken") and confirmation_stage != "CONFIRMED")
     )
 
     score = 0
@@ -3880,9 +3901,50 @@ def strict_trade_quality_grade(setup, professional_context):
             "rr_2": rr_2,
             "uses_zone": uses_zone,
             "uses_sr": uses_sr,
+            "zone_previously_broken": bool(setup.get("zone_previously_broken")),
         },
         "read_only": True,
     }
+
+
+def setup_quality_label(setup, professional_context=None):
+    setup = setup or {}
+    professional_context = professional_context or {}
+    checks = setup.get("quality_checks") or {}
+    warnings = [str(warning) for warning in (setup.get("quality_warnings") or [])]
+    rr_grade = (setup.get("risk_reward") or {}).get("rr_grade")
+    market_confirmation = (
+        checks.get("market_confirmation")
+        or professional_context.get("market_confirmation")
+        or "UNKNOWN"
+    )
+    action_label = (
+        checks.get("action_label")
+        or professional_context.get("aapl", {}).get("regime", {}).get("action_label")
+    )
+
+    blocked_reasons = []
+    if setup.get("zone_previously_broken") or any("failed/broken" in warning for warning in warnings):
+        blocked_reasons.append("zone failed")
+    if setup.get("zone_quality_grade") == "WEAK" or any("quality is weak" in warning for warning in warnings):
+        blocked_reasons.append("zone weak")
+    if action_label == "WAIT_FOR_BREAKOUT":
+        blocked_reasons.append("market regime says WAIT_FOR_BREAKOUT")
+    if rr_grade == "BAD":
+        blocked_reasons.append("risk/reward is BAD")
+    if market_confirmation == "UNKNOWN":
+        blocked_reasons.append("market confirmation UNKNOWN")
+
+    if setup.get("professional_grade") == "NO_TRADE" or rr_grade == "BAD":
+        label = "NO TRADE"
+    elif "zone failed" in blocked_reasons or "zone weak" in blocked_reasons:
+        label = "RESEARCH CONTEXT"
+    elif blocked_reasons or setup.get("confirmation_stage") in {"WATCH", "EARLY_CONFIRM"}:
+        label = "WATCH ONLY"
+    else:
+        label = "ENTRY QUALITY REVIEW"
+
+    return label, list(dict.fromkeys(blocked_reasons))
 
 
 
@@ -3922,6 +3984,10 @@ def grade_confirmation_setups_with_context(confirmation_setups, professional_con
         setup["professional_score"] = strict["score"]
         setup["quality_warnings"] = strict["warnings"]
         setup["quality_checks"] = strict["checks"]
+        label, blocked_reasons = setup_quality_label(setup, professional_context)
+        setup["setup_intent"] = label
+        setup["setup_label"] = label
+        setup["blocked_reasons"] = blocked_reasons
         setup["strict_grading_version"] = 2
         setup["read_only"] = True
 
@@ -4270,6 +4336,9 @@ def finalize_confirmation_setup_stages(confirmation_setups, professional_context
         failed = setup.get("status") == "INVALIDATED" or setup.get("confirmation_stage") == "FAILED"
         context_allowed = regime != "CHOP" and action_label != "NO_NEW_TRADES"
         rr_allowed = rr_grade != "BAD"
+        weak_zone = setup.get("zone_quality_grade") == "WEAK"
+        broken_zone = bool(setup.get("zone_previously_broken"))
+        existing_warnings = setup.get("confirmation_warnings") or []
 
         if failed:
             stage = "FAILED"
@@ -4282,15 +4351,17 @@ def finalize_confirmation_setup_stages(confirmation_setups, professional_context
             and trend_confirmed
             and context_allowed
             and rr_allowed
+            and not weak_zone
+            and not broken_zone
         ):
             stage = "CONFIRMED"
-        elif reclaim_confirmed:
+        elif reclaim_confirmed and not weak_zone:
             stage = "EARLY_CONFIRM"
         else:
             stage = "WATCH"
 
         reasons = []
-        warnings = []
+        warnings = list(existing_warnings)
         score = 0
         checks = [
             (reclaim_confirmed, 25, "Level reclaim/rejection detected.", "Waiting for reclaim/rejection."),
@@ -4312,6 +4383,12 @@ def finalize_confirmation_setup_stages(confirmation_setups, professional_context
         if failed:
             score = 0
             warnings.append("Setup failed its invalidation.")
+        if weak_zone:
+            warnings.append("Weak zone: confirmation capped at WATCH.")
+            score = min(score, 35)
+        if broken_zone:
+            warnings.append("Zone previously failed/broken.")
+            score = max(0, score - 15)
 
         setup["confirmation_stage"] = stage
         setup["confirmation_score"] = max(0, min(100, int(score)))
@@ -4374,6 +4451,14 @@ def build_confirmation_level_candidates(levels=None, support_resistance=None, su
             "quality_grade": quality_grade,
             "quality_reasons": quality_reasons or [],
             "zone_reaction": reaction,
+            "zone_failed": (reaction or {}).get("reaction_status") == "FAILED",
+            "zone_previously_broken": (
+                (reaction or {}).get("reaction_status") == "FAILED"
+                or any(
+                    "broken" in str(reason).lower() or "failed" in str(reason).lower()
+                    for reason in (quality_reasons or [])
+                )
+            ),
         })
 
     add("upside", levels.get("pmh"), "PMH", "premarket_high")
@@ -4527,6 +4612,16 @@ def detect_confirmation_setups(candles, current_price=None, levels=None, support
                 reclaim_confirmed = False
                 interaction = "level_touched_waiting_for_reclaim_or_rejection"
 
+            kind = level.get("kind")
+            zone_reaction = level.get("zone_reaction") or {}
+            zone_quality_grade = level.get("quality_grade") if kind in {"supply", "demand"} else None
+            zone_failed_same_direction = (
+                (kind == "demand" and direction == "bullish" and zone_reaction.get("reaction_status") == "FAILED")
+                or (kind == "supply" and direction == "bearish" and zone_reaction.get("reaction_status") == "FAILED")
+            )
+            if zone_failed_same_direction:
+                continue
+
             avg_vol = average_volume(candles, i, 20)
             candle_vol = candle.get("volume") or 0
             volume_confirmed = avg_vol > 0 and candle_vol > avg_vol
@@ -4585,6 +4680,16 @@ def detect_confirmation_setups(candles, current_price=None, levels=None, support
             else:
                 confirmation_stage = "WATCH"
 
+            zone_setup_warnings = []
+            if kind in {"supply", "demand"}:
+                if zone_quality_grade == "WEAK" and confirmation_stage in {"EARLY_CONFIRM", "CONFIRMED"}:
+                    confirmation_stage = "WATCH"
+                    score = min(score, 35)
+                    zone_setup_warnings.append("Weak zone: confirmation capped at WATCH.")
+                if level.get("zone_previously_broken"):
+                    score = max(0, score - 15)
+                    zone_setup_warnings.append("Zone previously failed/broken.")
+
             status = {
                 "WATCH": "WATCH",
                 "EARLY_CONFIRM": "WATCH",
@@ -4597,22 +4702,23 @@ def detect_confirmation_setups(candles, current_price=None, levels=None, support
                 "confirmation_stage": confirmation_stage,
                 "confirmation_score": score,
                 "confirmation_reasons": [],
-                "confirmation_warnings": [],
+                "confirmation_warnings": zone_setup_warnings,
                 "candle_closed_confirmed": bool(candle_closed_confirmed),
                 "next_candle_confirmed": bool(next_candle_confirmed),
                 "direction": direction,
                 "source": level.get("name"),
-                "kind": level.get("kind"),
+                "kind": kind,
                 "level_price": round_price(price),
                 "level_low": level.get("low"),
                 "level_high": level.get("high"),
                 "level_quality_score": level.get("quality_score"),
                 "level_quality_grade": level.get("quality_grade"),
                 "level_quality_reasons": level.get("quality_reasons", []),
-                "zone_quality_score": level.get("quality_score") if level.get("kind") in {"supply", "demand"} else None,
-                "zone_quality_grade": level.get("quality_grade") if level.get("kind") in {"supply", "demand"} else None,
-                "zone_quality_reasons": level.get("quality_reasons", []) if level.get("kind") in {"supply", "demand"} else [],
-                "zone_reaction": level.get("zone_reaction") if level.get("kind") in {"supply", "demand"} else None,
+                "zone_quality_score": level.get("quality_score") if kind in {"supply", "demand"} else None,
+                "zone_quality_grade": zone_quality_grade,
+                "zone_quality_reasons": level.get("quality_reasons", []) if kind in {"supply", "demand"} else [],
+                "zone_reaction": zone_reaction if kind in {"supply", "demand"} else None,
+                "zone_previously_broken": bool(level.get("zone_previously_broken")) if kind in {"supply", "demand"} else False,
                 "interaction": interaction,
                 "trigger": trigger,
                 "invalidation": invalidation,
@@ -4957,9 +5063,10 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
     for setup in (snapshot.get("confirmation_setups") or {}).get("setups", []) or []:
         direction = setup.get("direction")
         stage = setup.get("confirmation_stage") or setup.get("status") or "UNKNOWN"
+        intent = setup.get("setup_intent") or setup.get("setup_label")
         short = "Breakout Trigger" if direction == "bullish" else "Breakdown Trigger"
         add(
-            "CONFIRMATION_TRIGGER", f"{short} · {stage}", short, "confirmation_setup_engine",
+            "CONFIRMATION_TRIGGER", f"{intent + ' · ' if intent else ''}{short} · {stage}", short, "confirmation_setup_engine",
             "Confirmation setup trigger/reclaim/rejection level",
             "; ".join(setup.get("confirmation_reasons") or []) or f"{stage} {direction or ''} confirmation setup",
             price=setup.get("trigger") if numeric(setup.get("trigger")) else setup.get("level_price"),
@@ -5046,6 +5153,9 @@ def compact_ai_setup(setup, timeframe=None):
         "confirmation_stage",
         "confirmation_score",
         "status",
+        "setup_intent",
+        "setup_label",
+        "blocked_reasons",
         "volume_ratio",
         "quality_warnings",
         "quality_checks",
@@ -5053,6 +5163,9 @@ def compact_ai_setup(setup, timeframe=None):
         "confirmation_reasons",
         "candle_time",
         "read_only",
+        "zone_quality_grade",
+        "zone_previously_broken",
+        "zone_reaction",
     ]
     compact = {key: setup.get(key) for key in keys}
     compact["timeframe"] = timeframe
@@ -7461,6 +7574,24 @@ def performance_dashboard():
       flex-wrap: wrap;
       margin: 0;
     }
+    .view-tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 0 0 12px;
+    }
+    .view-tabs button {
+      padding: 7px 11px;
+      font-size: 12px;
+      background: #101927;
+      color: #9fb0c5;
+      border-color: #2b3b50;
+    }
+    .view-tabs button.active {
+      background: #1d3149;
+      color: #e2edf9;
+      border-color: #5d83ad;
+    }
     .quick-buttons button {
       padding: 6px 9px;
       font-size: 12px;
@@ -7656,7 +7787,12 @@ def performance_dashboard():
   <section class="filter-panel" aria-labelledby="performanceFiltersTitle">
     <div class="panel-heading">
       <h2 id="performanceFiltersTitle">Performance Filters</h2>
-      <span>Refine logged setup outcomes</span>
+      <span id="viewDescription">Tradable Setups excludes NO_TRADE research rows by default.</span>
+    </div>
+    <div class="view-tabs" role="tablist" aria-label="Performance view">
+      <button id="viewTradable" class="active" type="button" onclick="setPerformanceView('tradable')">Tradable Setups</button>
+      <button id="viewResearch" type="button" onclick="setPerformanceView('research')">Research / NO_TRADE</button>
+      <button id="viewAll" type="button" onclick="setPerformanceView('all')">All</button>
     </div>
     <div class="controls">
     <div class="control">
@@ -7707,7 +7843,7 @@ def performance_dashboard():
 
     <div class="control">
       <label>Min Count</label>
-      <input id="minCountFilter" type="number" min="0" step="1" value="0" oninput="render()" />
+      <input id="minCountFilter" type="number" min="0" step="1" value="5" oninput="render()" />
     </div>
 
     <div class="control">
@@ -7777,6 +7913,7 @@ def performance_dashboard():
         <th>Horizon</th>
         <th>Direction</th>
         <th>Grade</th>
+        <th>Intent</th>
         <th>Source</th>
         <th>Count</th>
         <th>Avg Favorable</th>
@@ -7795,6 +7932,7 @@ def performance_dashboard():
   <script>
     let rawSummary = [];
     let rawData = null;
+    let performanceView = "tradable";
 
     const gradeRank = {
       "A+": 5,
@@ -8017,6 +8155,23 @@ def performance_dashboard():
       };
     }
 
+    function setPerformanceView(view) {
+      performanceView = view;
+      document.getElementById("viewTradable").classList.toggle("active", view === "tradable");
+      document.getElementById("viewResearch").classList.toggle("active", view === "research");
+      document.getElementById("viewAll").classList.toggle("active", view === "all");
+      const description = document.getElementById("viewDescription");
+      if (view === "tradable") {
+        description.textContent = "Tradable Setups: A/B/C only, NO_TRADE excluded, minimum count defaults to 5.";
+        if (document.getElementById("minCountFilter").value === "0") document.getElementById("minCountFilter").value = 5;
+      } else if (view === "research") {
+        description.textContent = "Research / NO_TRADE: weak zones, failed zones, and no-trade outcomes for study only.";
+      } else {
+        description.textContent = "All logged chart outcomes, including tradable and research/no-trade rows.";
+      }
+      render();
+    }
+
     function rowEdge(row) {
       return Number(row.avg_favorable_move || 0) - Number(row.avg_adverse_move || 0);
     }
@@ -8025,6 +8180,11 @@ def performance_dashboard():
       const f = currentFilters();
 
       return summary.filter(row => {
+        const grade = String(row.professional_grade || "");
+        const intent = String(row.setup_intent || "");
+        const rowView = row.performance_view || (grade === "NO_TRADE" || intent === "NO TRADE" || intent === "RESEARCH CONTEXT" ? "research" : "tradable");
+        if (performanceView === "tradable" && (rowView !== "tradable" || !["A+", "A", "B", "C"].includes(grade))) return false;
+        if (performanceView === "research" && rowView !== "research") return false;
         if (f.timeframe !== "ALL" && String(row.timeframe) !== f.timeframe) return false;
         if (f.direction !== "ALL" && String(row.direction) !== f.direction) return false;
         if (f.grade !== "ALL" && String(row.professional_grade) !== f.grade) return false;
@@ -8040,6 +8200,9 @@ def performance_dashboard():
       const copy = [...rows];
 
       copy.sort((a, b) => {
+        const timeframeRank = row => row.timeframe === "5Min" ? 0 : row.timeframe === "15Min" ? 1 : row.timeframe === "1Min" ? 2 : 3;
+        const timeframeDelta = timeframeRank(a) - timeframeRank(b);
+        if (performanceView === "tradable" && timeframeDelta !== 0) return timeframeDelta;
         if (sortBy === "avgFav") {
           return Number(b.avg_favorable_move || 0) - Number(a.avg_favorable_move || 0);
         }
@@ -8114,6 +8277,7 @@ def performance_dashboard():
           <td>${row.horizon_candles || "-"} candles</td>
           <td>${row.direction || "-"}</td>
           <td><span class="pill ${gradeClass(grade)}">${grade}</span></td>
+          <td><span class="pill ${gradeClass(row.setup_intent === "NO TRADE" ? "NO_TRADE" : grade)}">${row.setup_intent || "-"}</span></td>
           <td>${row.source || "-"}</td>
           <td>${row.count || 0}</td>
           <td class="good">${fmtNum(row.avg_favorable_move)}</td>
@@ -8142,6 +8306,7 @@ def performance_dashboard():
         document.getElementById("totalOutcomes").textContent = data.total_outcomes ?? 0;
 
         hydrateFilters(rawSummary);
+        setPerformanceView(performanceView);
         render();
 
         status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -8159,7 +8324,7 @@ def performance_dashboard():
       document.getElementById("gradeFilter").value = "ALL";
       document.getElementById("sourceFilter").value = "ALL";
       document.getElementById("horizonFilter").value = "ALL";
-      document.getElementById("minCountFilter").value = 0;
+      document.getElementById("minCountFilter").value = performanceView === "tradable" ? 5 : 0;
       document.getElementById("sortBy").value = "bestEdge";
       render();
     }
@@ -8175,6 +8340,7 @@ def performance_dashboard():
 
     function presetNoTrade() {
       resetFilters();
+      setPerformanceView("research");
       if ([...document.getElementById("gradeFilter").options].some(o => o.value === "NO_TRADE")) {
         document.getElementById("gradeFilter").value = "NO_TRADE";
       }
