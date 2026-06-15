@@ -1724,7 +1724,7 @@ def validate_raw_candles(raw_candles):
             candle["validation_reasons"].extend(evidence)
 
     for candle in audited:
-        excluded = candle["validation_status"] in {"SUSPICIOUS", "REJECTED"}
+        excluded = candle["validation_status"] == "REJECTED"
         candle["excluded_from_calculations"] = excluded
         candle["excluded_from_display"] = excluded
     validated = [candle for candle in audited if not candle["excluded_from_calculations"]]
@@ -1816,7 +1816,7 @@ def build_candle_integrity_bundle(bars_1min, symbol, timeframe, provider_bars=No
     corrected = [item for item in candles if item["validation_status"] == "CORRECTED"]
     warnings = []
     if suspicious:
-        warnings.append(f"{len(suspicious)} suspicious candle(s) filtered.")
+        warnings.append(f"{len(suspicious)} suspicious candle(s) retained with warning.")
     if rejected:
         warnings.append(f"{len(rejected)} rejected candle(s) filtered.")
     if corrected:
@@ -6889,6 +6889,70 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
             "data_status": "error",
             "errors": [str(e)],
         }), 500
+
+
+@APP.route("/api/chart/rebuild", methods=["POST"])
+def rebuild_chart_data():
+    try:
+        symbol = normalize_symbol(request.args.get("symbol", SYMBOL))
+    except ValueError as error:
+        return jsonify({"data_status": "error", "errors": [str(error)], "read_only": True}), 400
+
+    with candle_audit_lock:
+        for key in [key for key in latest_candle_audits if key[0] == symbol]:
+            latest_candle_audits.pop(key, None)
+        recent_validated_candles.pop(symbol, None)
+
+    with _ai_snapshot_lock:
+        for key in [key for key in _ai_snapshot_cache if key[0] == symbol]:
+            _ai_snapshot_cache.pop(key, None)
+
+    if symbol == SYMBOL:
+        for timeframe in TIMEFRAMES:
+            live_candles[timeframe] = None
+
+    rebuilt = {}
+    warnings = []
+    for timeframe in TIMEFRAMES:
+        response = chart_data(timeframe_override=timeframe, include_logging=False, symbol_override=symbol)
+        status_code = 200
+        if isinstance(response, tuple):
+            response, status_code = response
+        payload = response.get_json() or {}
+        if status_code >= 400 or payload.get("data_status") != "ok":
+            return jsonify({
+                "symbol": symbol,
+                "data_status": "error",
+                "errors": payload.get("errors") or [f"{timeframe} rebuild failed."],
+                "read_only": True,
+            }), status_code if status_code >= 400 else 500
+        rebuilt[timeframe] = {
+            "data_quality_status": payload.get("data_quality_status"),
+            "candle_accuracy_mode": payload.get("candle_accuracy_mode"),
+            "raw_candle_count": payload.get("raw_candle_count"),
+            "validated_candle_count": payload.get("validated_candle_count"),
+            "suspicious_candle_count": payload.get("suspicious_candle_count"),
+            "rejected_candle_count": payload.get("rejected_candle_count"),
+            "corrected_candle_count": payload.get("corrected_candle_count"),
+            "candle_data_warnings": payload.get("candle_data_warnings") or [],
+            "chart_line_count": len(payload.get("chart_lines") or []),
+            "read_only": True,
+        }
+        warnings.extend(payload.get("candle_data_warnings") or [])
+
+    ai_snapshot = build_ai_chart_snapshot("5Min", symbol)
+    statuses = [item.get("data_quality_status") for item in rebuilt.values()]
+    overall_status = "DEGRADED" if "DEGRADED" in statuses else ("WARNING" if "WARNING" in statuses else "CLEAN")
+    return jsonify({
+        "symbol": symbol,
+        "data_status": "ok",
+        "data_quality_status": overall_status,
+        "candle_data_warnings": list(dict.fromkeys(warnings)),
+        "timeframes": rebuilt,
+        "ai_snapshot_context_rebuilt": bool(ai_snapshot),
+        "message": "Chart data rebuilt from validated candles",
+        "read_only": True,
+    })
 
 
 @APP.route("/api/ai/snapshot")

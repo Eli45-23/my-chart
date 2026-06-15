@@ -11,6 +11,8 @@ const toggleButtons = document.querySelectorAll(".toggle-btn[data-layer]");
 const cleanModeToggle = document.getElementById("cleanModeToggle");
 const symbolInput = document.getElementById("symbolInput");
 const loadSymbolButton = document.getElementById("loadSymbolButton");
+const rebuildChartButton = document.getElementById("rebuildChartButton");
+const rebuildBanner = document.getElementById("rebuildBanner");
 const chartTitleEl = document.getElementById("chartTitle");
 const chartSubtitleEl = document.getElementById("chartSubtitle");
 const lineAuditToggle = document.getElementById("lineAuditToggle");
@@ -624,6 +626,51 @@ function loadSelectedSymbol() {
   reloadForTimeframe();
 }
 
+let rebuildBannerTimer = null;
+
+function showRebuildBanner(message, tone = "") {
+  if (!rebuildBanner) return;
+  if (rebuildBannerTimer) clearTimeout(rebuildBannerTimer);
+  rebuildBanner.textContent = message;
+  rebuildBanner.className = `rebuild-banner visible ${tone}`.trim();
+  rebuildBannerTimer = setTimeout(() => {
+    rebuildBanner.className = "rebuild-banner";
+  }, 7000);
+}
+
+async function rebuildChartData() {
+  if (!rebuildChartButton) return;
+  rebuildChartButton.disabled = true;
+  rebuildChartButton.textContent = "Rebuilding...";
+  statusEl.textContent = `Rebuilding ${activeSymbol} validated candles...`;
+  errorEl.textContent = "";
+
+  try {
+    const response = await fetch(`/api/chart/rebuild?symbol=${encodeURIComponent(activeSymbol)}`, {
+      method: "POST",
+      headers: { "Accept": "application/json" },
+    });
+    const result = await response.json();
+    if (!response.ok || result.data_status !== "ok") {
+      throw new Error((result.errors || ["Chart rebuild failed."]).join(", "));
+    }
+    await reloadForTimeframe();
+    const warnings = result.candle_data_warnings || [];
+    showRebuildBanner(
+      warnings.length
+        ? `Chart data rebuilt from validated candles · ${warnings.join(" | ")}`
+        : "Chart data rebuilt from validated candles",
+      result.data_quality_status === "CLEAN" ? "" : "warning"
+    );
+  } catch (error) {
+    errorEl.textContent = `Chart rebuild error: ${error.message}`;
+    showRebuildBanner(`Chart rebuild failed: ${error.message}`, "error");
+  } finally {
+    rebuildChartButton.disabled = false;
+    rebuildChartButton.textContent = "Rebuild Chart Data";
+  }
+}
+
 function formatPrice(value) {
   return value === null || value === undefined ? "n/a" : Number(value).toFixed(2);
 }
@@ -1032,6 +1079,7 @@ tfButtons.forEach((btn) => {
 });
 
 loadSymbolButton.addEventListener("click", loadSelectedSymbol);
+rebuildChartButton?.addEventListener("click", rebuildChartData);
 symbolInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadSelectedSymbol();
 });
