@@ -1847,6 +1847,135 @@ def build_candle_integrity_bundle(bars_1min, symbol, timeframe, provider_bars=No
     }
 
 
+def _comparison_ohlcv(candle):
+    if not candle:
+        return None
+    if "raw_open" in candle:
+        return {
+            "open": candle.get("raw_open"),
+            "high": candle.get("raw_high"),
+            "low": candle.get("raw_low"),
+            "close": candle.get("raw_close"),
+            "volume": candle.get("raw_volume"),
+        }
+    return {key: candle.get(key) for key in ("open", "high", "low", "close", "volume")}
+
+
+def _comparison_timestamp_et(epoch):
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone(ET).isoformat()
+
+
+def build_candle_comparison(audit, symbol, timeframe):
+    """
+    Build a read-only audit view. Raw/provider candles never feed calculations here.
+    """
+    audit = audit or {}
+    seconds = TIMEFRAMES.get(timeframe, 300)
+    raw_provider = [_audited_candle(item) for item in audit.get("raw_candles") or []]
+    rebuilt = audit.get("validated_candles") or []
+    displayed = audit.get("validated_candles") or []
+    rejected = audit.get("rejected_candles") or []
+    suspicious = audit.get("suspicious_candles") or []
+
+    def bucket(candle):
+        epoch = candle.get("time")
+        return epoch if timeframe == "1Min" or epoch is None else epoch - epoch % seconds
+
+    provider_by_bucket = {bucket(item): item for item in raw_provider if bucket(item) is not None}
+    rebuilt_by_bucket = {bucket(item): item for item in rebuilt if bucket(item) is not None}
+    displayed_by_bucket = {bucket(item): item for item in displayed if bucket(item) is not None}
+    rejected_by_bucket = {}
+    for item in rejected:
+        rejected_by_bucket.setdefault(bucket(item), []).append(item)
+
+    comparison_rows = []
+    mismatch_rows = []
+    for epoch in sorted(set(provider_by_bucket) | set(rebuilt_by_bucket) | set(rejected_by_bucket)):
+        provider = provider_by_bucket.get(epoch)
+        rebuilt_candle = rebuilt_by_bucket.get(epoch)
+        displayed_candle = displayed_by_bucket.get(epoch)
+        rejected_sources = rejected_by_bucket.get(epoch) or []
+        reasons = []
+        if rejected_sources:
+            reasons.append(
+                f"Raw Alpaca {timeframe} aggregate contains {len(rejected_sources)} rejected source 1Min candle(s); "
+                "bad print filtered from rebuilt/displayed candle."
+            )
+        cross_mismatch = next(
+            (item for item in audit.get("cross_timeframe_validation") or [] if item.get("time") == epoch),
+            None,
+        )
+        if cross_mismatch and not rejected_sources:
+            reasons.append("Raw Alpaca provider aggregate differs from the validated 1Min rebuild.")
+        if provider and not rebuilt_candle:
+            reasons.append("No rebuilt candle met the validated-minute coverage requirement.")
+        if rebuilt_candle and not provider:
+            reasons.append("No raw Alpaca provider aggregate was available for this bucket.")
+
+        raw_values = _comparison_ohlcv(provider)
+        rebuilt_values = _comparison_ohlcv(rebuilt_candle)
+        displayed_values = _comparison_ohlcv(displayed_candle)
+        values_differ = raw_values != rebuilt_values if raw_values is not None and rebuilt_values is not None else bool(reasons)
+        if values_differ and not reasons:
+            reasons.append("Raw Alpaca provider aggregate differs from the validated 1Min rebuild.")
+
+        row = {
+            "timestamp_et": _comparison_timestamp_et(epoch),
+            "time": epoch,
+            "raw_provider_ohlcv": raw_values,
+            "rebuilt_ohlcv": rebuilt_values,
+            "displayed_ohlcv": displayed_values,
+            "validation_status": (
+                "REJECTED_SOURCE_FILTERED"
+                if rejected_sources
+                else (rebuilt_candle or provider or {}).get("validation_status", "UNKNOWN")
+            ),
+            "used_for_display": displayed_candle is not None,
+            "used_for_calculations": rebuilt_candle is not None,
+            "rejected_source_candles": [
+                {
+                    "timestamp_et": _comparison_timestamp_et(item.get("time")),
+                    "raw_ohlcv": _comparison_ohlcv(item),
+                    "validation_status": item.get("validation_status"),
+                    "validation_reasons": item.get("validation_reasons") or [],
+                    "used_for_display": False,
+                    "used_for_calculations": False,
+                    "read_only": True,
+                }
+                for item in rejected_sources
+            ],
+            "mismatch_reason": " ".join(reasons) if reasons else None,
+            "read_only": True,
+        }
+        comparison_rows.append(row)
+        if row["mismatch_reason"]:
+            mismatch_rows.append(row)
+
+    warnings = list(audit.get("candle_data_warnings") or [])
+    if rejected:
+        warnings.append("Raw Alpaca bad print filtered; chart displays rebuilt validated candle.")
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "feed": FEED,
+        "data_quality_status": audit.get("data_quality_status", "DEGRADED"),
+        "candle_accuracy_mode": audit.get("candle_accuracy_mode", "RAW_PROVIDER"),
+        "raw_alpaca_1min_bars": audit.get("raw_1min_candles") or [],
+        "raw_alpaca_provider_bars": audit.get("raw_candles") or [],
+        "validated_1min_candles": audit.get("validated_1min_candles") or [],
+        "rebuilt_timeframe_candles": rebuilt,
+        "displayed_candles": displayed,
+        "rejected_candles": rejected,
+        "suspicious_candles": suspicious,
+        "comparison_warnings": list(dict.fromkeys(warnings)),
+        "mismatches": mismatch_rows,
+        "comparisons": comparison_rows,
+        "read_only": True,
+    }
+
+
 def bucket_time(timestamp_utc, tf_seconds):
     epoch = int(timestamp_utc.timestamp())
     return epoch - (epoch % tf_seconds)
@@ -5628,6 +5757,12 @@ def build_ai_chart_snapshot(requested_timeframe="5Min", symbol=SYMBOL):
         "rejected_candle_count": requested_payload.get("rejected_candle_count", 0),
         "corrected_candle_count": requested_payload.get("corrected_candle_count", 0),
         "candle_data_warnings": requested_payload.get("candle_data_warnings") or [],
+        "data_quality_summary": (
+            f"{requested_payload.get('data_quality_status', 'DEGRADED')} · "
+            f"{requested_payload.get('candle_accuracy_mode', 'RAW_PROVIDER')} · "
+            f"{requested_payload.get('rejected_candle_count', 0)} rejected · "
+            f"{requested_payload.get('suspicious_candle_count', 0)} suspicious"
+        ),
         "timeframes": timeframe_contexts,
         "market_context": {
             "market_regime": regime.get("regime"),
@@ -7007,6 +7142,35 @@ def debug_candles():
         "cross_timeframe_validation": (audit.get("cross_timeframe_validation") or [])[-limit:],
         "read_only": True,
     })
+
+
+@APP.route("/api/debug/candle-compare")
+def debug_candle_compare():
+    symbol = normalize_symbol(request.args.get("symbol", SYMBOL))
+    timeframe = request.args.get("timeframe", "5Min")
+    timeframe = timeframe if timeframe in TIMEFRAMES else "5Min"
+    response = chart_data(timeframe_override=timeframe, include_logging=False, symbol_override=symbol)
+    if isinstance(response, tuple):
+        response, status_code = response
+        if status_code >= 400:
+            return response, status_code
+    with candle_audit_lock:
+        audit = dict(latest_candle_audits.get((symbol, timeframe)) or {})
+    comparison = build_candle_comparison(audit, symbol, timeframe)
+    limit = 500
+    for key in (
+        "raw_alpaca_1min_bars",
+        "raw_alpaca_provider_bars",
+        "validated_1min_candles",
+        "rebuilt_timeframe_candles",
+        "displayed_candles",
+        "rejected_candles",
+        "suspicious_candles",
+        "comparisons",
+        "mismatches",
+    ):
+        comparison[key] = (comparison.get(key) or [])[-limit:]
+    return jsonify(comparison)
 
 
 @APP.route("/api/ai/latest-review")

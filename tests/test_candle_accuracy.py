@@ -72,6 +72,33 @@ class CandleAccuracyTests(unittest.TestCase):
         )
         self.assertNotEqual(levels["pml"], 290.403)
 
+    def test_candle_comparison_exposes_bad_print_as_unused_audit_data(self):
+        bars = list(self.normal)
+        bad_time = datetime(2026, 6, 12, 12, 4, tzinfo=timezone.utc)
+        bars.append(bar(bad_time, 292.9067, 293.0, 290.403, 290.403, 824))
+        bars.append(bar(bad_time + timedelta(minutes=1), 292.82, 292.9, 292.78, 292.84, 1300))
+        bars.sort(key=lambda item: item["t"])
+        provider_5min = [
+            bar(datetime(2026, 6, 12, 12, 0, tzinfo=timezone.utc), 292.9067, 293.0, 290.403, 290.403, 7687)
+        ]
+
+        bundle = server_stream.build_candle_integrity_bundle(bars, "AAPL", "5Min", provider_5min)
+        comparison = server_stream.build_candle_comparison(bundle, "AAPL", "5Min")
+        bad_row = next(
+            row
+            for row in comparison["mismatches"]
+            if any(source["raw_ohlcv"]["low"] == 290.403 for source in row["rejected_source_candles"])
+        )
+        rejected_source = next(
+            source for source in bad_row["rejected_source_candles"] if source["raw_ohlcv"]["low"] == 290.403
+        )
+
+        self.assertEqual(rejected_source["raw_ohlcv"]["low"], 290.403)
+        self.assertFalse(rejected_source["used_for_display"])
+        self.assertFalse(rejected_source["used_for_calculations"])
+        self.assertNotEqual(bad_row["displayed_ohlcv"]["low"], 290.403)
+        self.assertIn("bad print filtered", bad_row["mismatch_reason"])
+
     def test_rebuild_excludes_bucket_below_sixty_percent_coverage(self):
         audited, validated = server_stream.validate_raw_candles(
             server_stream.raw_candles_from_bars(self.normal[:5], "AAPL", "1Min")

@@ -337,6 +337,19 @@
       line-height: 1.55;
     }
     .audit-detail.visible { display: block; }
+    .compare-summary {
+      margin-bottom: 8px;
+      padding: 8px;
+      border: 1px solid #29384b;
+      border-radius: 7px;
+      background: #0b121c;
+      color: #aebac8;
+      font-size: 10px;
+      line-height: 1.55;
+    }
+    .compare-warning { color: var(--warn); }
+    .compare-bad { border-color: rgba(215, 121, 121, .38); background: rgba(82, 38, 42, .16); }
+    .compare-values { margin-top: 4px; color: #9ba9b9; font-size: 9px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -385,6 +398,7 @@
     <span class="toggle-label">Setups</span>
     <button class="toggle-btn active" data-layer="confirmationSetups">Confirmation Setups</button>
     <button class="toggle-btn audit-btn" id="lineAuditToggle" type="button" aria-pressed="false">Line Audit</button>
+    <button class="toggle-btn" id="candleCompareToggle" type="button" aria-pressed="false">Candle Compare</button>
   </div>
 
   <div class="chart-shell">
@@ -401,12 +415,20 @@
       <div class="audit-list" id="lineAuditList"></div>
       <div class="audit-detail" id="lineAuditDetail"></div>
     </aside>
+    <aside id="candleComparePanel" class="line-audit-panel" aria-label="Raw versus validated candle comparison">
+      <div class="audit-head">
+        <div><div class="audit-title">Candle Compare</div><div class="audit-meta" id="candleCompareMeta">Open to load audit data</div></div>
+        <button class="audit-close" id="candleCompareClose" type="button" aria-label="Close Candle Compare">Close</button>
+      </div>
+      <div class="compare-summary" id="candleCompareSummary">Raw provider data is preserved for read-only audit.</div>
+      <div class="audit-list" id="candleCompareList"></div>
+    </aside>
   </div>
   <div class="legend-wrap">
     <div class="legend" id="legend"></div>
   </div>
   <div class="error" id="error"></div>
 
-  <script src="/app_stream.js?v=stream40"></script>
+  <script src="/app_stream.js?v=stream41"></script>
 </body>
 </html>

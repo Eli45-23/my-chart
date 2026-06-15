@@ -21,6 +21,12 @@ const lineAuditClose = document.getElementById("lineAuditClose");
 const lineAuditList = document.getElementById("lineAuditList");
 const lineAuditMeta = document.getElementById("lineAuditMeta");
 const lineAuditDetail = document.getElementById("lineAuditDetail");
+const candleCompareToggle = document.getElementById("candleCompareToggle");
+const candleComparePanel = document.getElementById("candleComparePanel");
+const candleCompareClose = document.getElementById("candleCompareClose");
+const candleCompareMeta = document.getElementById("candleCompareMeta");
+const candleCompareSummary = document.getElementById("candleCompareSummary");
+const candleCompareList = document.getElementById("candleCompareList");
 
 const CLEAN_MODE_STORAGE_KEY = "aaplChartCleanMode";
 let cleanMode = true;
@@ -587,6 +593,62 @@ function renderLineAudit(selectedId = null) {
   ` : "";
 }
 
+function closeLineAudit() {
+  lineAuditPanel.classList.remove("visible");
+  lineAuditToggle.classList.remove("active");
+  lineAuditToggle.setAttribute("aria-pressed", "false");
+}
+
+function closeCandleCompare() {
+  candleComparePanel.classList.remove("visible");
+  candleCompareToggle.classList.remove("active");
+  candleCompareToggle.setAttribute("aria-pressed", "false");
+}
+
+function compactOhlcv(values) {
+  if (!values) return "not available";
+  const price = value => Number.isFinite(Number(value)) ? Number(value).toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : "n/a";
+  return `O ${price(values.open)} · H ${price(values.high)} · L ${price(values.low)} · C ${price(values.close)} · V ${values.volume ?? "n/a"}`;
+}
+
+async function loadCandleCompare() {
+  candleCompareMeta.textContent = `${activeSymbol} · ${activeTimeframe} · loading preserved audit data`;
+  candleCompareList.innerHTML = `<div class="audit-meta">Loading raw and validated candle comparison...</div>`;
+  try {
+    const response = await fetch(`/api/debug/candle-compare?symbol=${encodeURIComponent(activeSymbol)}&timeframe=${encodeURIComponent(activeTimeframe)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error((data.errors || ["Candle comparison unavailable."]).join(", "));
+
+    const rejected = data.rejected_candles || [];
+    const mismatches = data.mismatches || [];
+    candleCompareMeta.textContent = `${data.symbol} · ${data.timeframe} · ${data.feed || "provider"} · ${data.data_quality_status} · ${data.candle_accuracy_mode}`;
+    candleCompareSummary.innerHTML = `
+      <strong>Candle Data Status: ${escapeHtml(data.data_quality_status)}</strong><br>
+      Displayed source: ${escapeHtml(data.candle_accuracy_mode)}<br>
+      ${rejected.length
+        ? `<span class="compare-warning">Raw Alpaca bad print filtered; chart displays rebuilt validated candle.</span>`
+        : "No rejected raw Alpaca prints in the current audit window."}<br>
+      Warnings: ${escapeHtml((data.comparison_warnings || []).join(" | ") || "none")}<br>
+      Read-only comparison. Raw provider candles are audit data only.
+    `;
+    candleCompareList.innerHTML = mismatches.slice(-80).reverse().map(row => {
+      const rejectedSources = row.rejected_source_candles || [];
+      return `
+        <div class="audit-item ${rejectedSources.length ? "compare-bad" : ""}">
+          <div class="audit-row"><span class="audit-label">${escapeHtml(row.timestamp_et || "Unknown time")}</span><span>${escapeHtml(row.validation_status)}</span></div>
+          <div class="audit-row audit-sub"><span>Display: ${row.used_for_display ? "Yes" : "No"}</span><span>Calculations: ${row.used_for_calculations ? "Yes" : "No"}</span></div>
+          <div class="compare-values">Raw provider: ${escapeHtml(compactOhlcv(row.raw_provider_ohlcv))}<br>Rebuilt: ${escapeHtml(compactOhlcv(row.rebuilt_ohlcv))}<br>Displayed: ${escapeHtml(compactOhlcv(row.displayed_ohlcv))}</div>
+          ${rejectedSources.map(source => `<div class="compare-values compare-warning">Rejected source ${escapeHtml(source.timestamp_et)}: ${escapeHtml(compactOhlcv(source.raw_ohlcv))} · Display No · Calculations No</div>`).join("")}
+          <div class="compare-values">${escapeHtml(row.mismatch_reason || "")}</div>
+        </div>
+      `;
+    }).join("") || `<div class="audit-meta">No raw-vs-rebuilt mismatches. ${rejected.length} rejected raw print(s) remain available in debug data.</div>`;
+  } catch (error) {
+    candleCompareMeta.textContent = `${activeSymbol} · ${activeTimeframe} · unavailable`;
+    candleCompareList.innerHTML = `<div class="compare-summary compare-warning">${escapeHtml(error.message)}</div>`;
+  }
+}
+
 function legendGroup(title, items, className = "") {
   return `<section class="legend-group ${className}"><span class="legend-group-title">${title}</span><div class="legend-pills">${items.filter(Boolean).join("")}</div></section>`;
 }
@@ -813,10 +875,13 @@ function updateLegend(data) {
   streamStatusEl.classList.toggle("reconnecting", !stream.connected);
   if (dataQualityStatusEl) {
     const quality = latestPayload.data_quality_status || "DEGRADED";
-    const filtered = Number(latestPayload.suspicious_candle_count || 0) + Number(latestPayload.rejected_candle_count || 0);
-    dataQualityStatusEl.textContent = quality === "CLEAN"
+    const rejected = Number(latestPayload.rejected_candle_count || 0);
+    const suspicious = Number(latestPayload.suspicious_candle_count || 0);
+    dataQualityStatusEl.textContent = rejected
+      ? "Candle Data WARNING — raw Alpaca bad print filtered"
+      : quality === "CLEAN"
       ? `Data clean · ${latestPayload.candle_accuracy_mode || "VALIDATED"}`
-      : `Data ${quality.toLowerCase()}${filtered ? ` · ${filtered} filtered` : ""}`;
+      : `Data ${quality.toLowerCase()}${suspicious ? ` · ${suspicious} suspicious retained` : ""}`;
     dataQualityStatusEl.classList.toggle("data-warning", quality === "WARNING");
     dataQualityStatusEl.classList.toggle("data-degraded", quality === "DEGRADED");
   }
@@ -1121,6 +1186,7 @@ cleanModeToggle.addEventListener("click", () => {
 
 lineAuditToggle.addEventListener("click", () => {
   const visible = !lineAuditPanel.classList.contains("visible");
+  if (visible) closeCandleCompare();
   lineAuditPanel.classList.toggle("visible", visible);
   lineAuditToggle.classList.toggle("active", visible);
   lineAuditToggle.setAttribute("aria-pressed", String(visible));
@@ -1128,15 +1194,26 @@ lineAuditToggle.addEventListener("click", () => {
 });
 
 lineAuditClose.addEventListener("click", () => {
-  lineAuditPanel.classList.remove("visible");
-  lineAuditToggle.classList.remove("active");
-  lineAuditToggle.setAttribute("aria-pressed", "false");
+  closeLineAudit();
 });
 
 lineAuditList.addEventListener("click", event => {
   const item = event.target.closest("[data-line-id]");
   if (item) renderLineAudit(item.dataset.lineId);
 });
+
+candleCompareToggle.addEventListener("click", () => {
+  const visible = !candleComparePanel.classList.contains("visible");
+  if (visible) {
+    closeLineAudit();
+    loadCandleCompare();
+  }
+  candleComparePanel.classList.toggle("visible", visible);
+  candleCompareToggle.classList.toggle("active", visible);
+  candleCompareToggle.setAttribute("aria-pressed", String(visible));
+});
+
+candleCompareClose.addEventListener("click", closeCandleCompare);
 
 window.addEventListener("resize", () => {
   chart.applyOptions({ width: chartEl.clientWidth });
