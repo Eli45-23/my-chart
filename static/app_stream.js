@@ -504,8 +504,10 @@ function renderAiEntryMarker(review) {
 }
 
 async function refreshAiEntryMarker() {
+  const requestedSymbol = activeSymbol;
   try {
-    const response = await fetch(`/api/ai/latest-review?symbol=${encodeURIComponent(activeSymbol)}`);
+    const response = await fetch(`/api/ai/latest-review?symbol=${encodeURIComponent(requestedSymbol)}`);
+    if (requestedSymbol !== activeSymbol) return;
     if (!response.ok) {
       removeAiEntryMarker();
       return;
@@ -906,11 +908,14 @@ function compactOhlcv(values) {
 }
 
 async function loadCandleCompare() {
-  candleCompareMeta.textContent = `${activeSymbol} · ${activeTimeframe} · loading preserved audit data`;
+  const requestedSymbol = activeSymbol;
+  const requestedTimeframe = activeTimeframe;
+  candleCompareMeta.textContent = `${requestedSymbol} · ${requestedTimeframe} · loading preserved audit data`;
   candleCompareList.innerHTML = `<div class="audit-meta">Loading raw and validated candle comparison...</div>`;
   try {
-    const response = await fetch(`/api/debug/candle-compare?symbol=${encodeURIComponent(activeSymbol)}&timeframe=${encodeURIComponent(activeTimeframe)}`);
+    const response = await fetch(`/api/debug/candle-compare?symbol=${encodeURIComponent(requestedSymbol)}&timeframe=${encodeURIComponent(requestedTimeframe)}`);
     const data = await response.json();
+    if (requestedSymbol !== activeSymbol || requestedTimeframe !== activeTimeframe) return;
     if (!response.ok) throw new Error((data.errors || ["Candle comparison unavailable."]).join(", "));
 
     const rejected = data.rejected_candles || [];
@@ -970,6 +975,22 @@ function updateSymbolUi() {
   chartSubtitleEl.textContent = `${activeSymbol} · Read-only AI-assisted chart review · Eastern Time`;
 }
 
+function resetSymbolScopedUi() {
+  latestPayload = null;
+  removeAiEntryMarker();
+  closeLineAudit();
+  closeCandleCompare();
+  lineAuditList.innerHTML = "";
+  lineAuditMeta.textContent = `${activeSymbol} · ${activeTimeframe} · waiting for chart data`;
+  lineAuditDetail.innerHTML = "";
+  candleCompareMeta.textContent = `${activeSymbol} · ${activeTimeframe} · not loaded`;
+  candleCompareSummary.innerHTML = "";
+  candleCompareList.innerHTML = "";
+  streamStatusEl.textContent = `${activeSymbol} stream waiting`;
+  streamStatusEl.classList.remove("connected");
+  streamStatusEl.classList.add("reconnecting");
+}
+
 function loadSelectedSymbol() {
   const symbol = normalizeSymbolInput(symbolInput.value);
   if (!symbol) {
@@ -977,8 +998,13 @@ function loadSelectedSymbol() {
     symbolInput.focus();
     return;
   }
+  if (symbol === activeSymbol) {
+    reloadForTimeframe();
+    return;
+  }
   activeSymbol = symbol;
   updateSymbolUi();
+  resetSymbolScopedUi();
   reloadForTimeframe();
 }
 
@@ -1166,7 +1192,9 @@ function updateLegend(data) {
     legendGroup("Risk / Warnings", riskItems, "warnings"),
   ].join("");
 
-  streamStatusEl.textContent = stream.connected ? "Stream connected" : `Stream ${stream.error || "waiting"}`;
+  streamStatusEl.textContent = stream.connected
+    ? `${activeSymbol} stream connected`
+    : `${activeSymbol} stream ${stream.error || "waiting"}`;
   streamStatusEl.classList.toggle("connected", Boolean(stream.connected));
   streamStatusEl.classList.toggle("reconnecting", !stream.connected);
   if (dataQualityStatusEl) {
@@ -1351,9 +1379,12 @@ function drawStaticLevels(data) {
 async function loadInitialChart() {
   errorEl.textContent = "";
   statusEl.textContent = "Loading chart...";
+  const requestedSymbol = activeSymbol;
+  const requestedTimeframe = activeTimeframe;
 
-  const res = await fetch(`/api/chart?symbol=${encodeURIComponent(activeSymbol)}&timeframe=${encodeURIComponent(activeTimeframe)}`);
+  const res = await fetch(`/api/chart?symbol=${encodeURIComponent(requestedSymbol)}&timeframe=${encodeURIComponent(requestedTimeframe)}`);
   const data = await res.json();
+  if (requestedSymbol !== activeSymbol || requestedTimeframe !== activeTimeframe) return;
 
   if (!res.ok || data.data_status !== "ok") {
     throw new Error((data.errors || ["Unknown error"]).join(", "));
@@ -1388,10 +1419,15 @@ function connectStream() {
     eventSource.close();
   }
 
-  eventSource = new EventSource(`/api/stream?symbol=${encodeURIComponent(activeSymbol)}&timeframe=${encodeURIComponent(activeTimeframe)}`);
+  const streamSymbol = activeSymbol;
+  const streamTimeframe = activeTimeframe;
+  eventSource = new EventSource(`/api/stream?symbol=${encodeURIComponent(streamSymbol)}&timeframe=${encodeURIComponent(streamTimeframe)}`);
 
   eventSource.onmessage = (event) => {
     const data = JSON.parse(event.data);
+    if (data.symbol && data.symbol !== activeSymbol) return;
+    if (data.timeframe && data.timeframe !== activeTimeframe) return;
+    if (streamSymbol !== activeSymbol || streamTimeframe !== activeTimeframe) return;
 
     if (data.type === "live_candle" && data.candle) {
       candleSeries.update(data.candle);
@@ -1430,13 +1466,18 @@ function connectStream() {
   };
 
   eventSource.onerror = () => {
-    streamStatusEl.textContent = "Stream: reconnecting...";
+    if (streamSymbol === activeSymbol && streamTimeframe === activeTimeframe) {
+      streamStatusEl.textContent = `${activeSymbol} stream reconnecting...`;
+    }
   };
 }
 
 async function reloadForTimeframe() {
+  const requestedSymbol = activeSymbol;
+  const requestedTimeframe = activeTimeframe;
   try {
     didInitialLoad = false;
+    latestPayload = null;
     candleSeries.setData([]);
     updateChartEmptyState([]);
     vwapSeries.setData([]);
@@ -1445,8 +1486,10 @@ async function reloadForTimeframe() {
     clearPriceLines();
 
     await loadInitialChart();
+    if (requestedSymbol !== activeSymbol || requestedTimeframe !== activeTimeframe) return;
     connectStream();
   } catch (err) {
+    if (requestedSymbol !== activeSymbol || requestedTimeframe !== activeTimeframe) return;
     errorEl.textContent = `Chart error: ${err.message}`;
     statusEl.textContent = "Error loading chart";
     updateChartEmptyState([]);
@@ -1552,9 +1595,12 @@ setInterval(refreshAiEntryMarker, 30000);
 // Live candle movement comes from the stream.
 setInterval(() => {
   if (didInitialLoad) {
-    fetch(`/api/chart?symbol=${encodeURIComponent(activeSymbol)}&timeframe=${encodeURIComponent(activeTimeframe)}`)
+    const requestedSymbol = activeSymbol;
+    const requestedTimeframe = activeTimeframe;
+    fetch(`/api/chart?symbol=${encodeURIComponent(requestedSymbol)}&timeframe=${encodeURIComponent(requestedTimeframe)}`)
       .then(r => r.json())
       .then(data => {
+        if (requestedSymbol !== activeSymbol || requestedTimeframe !== activeTimeframe) return;
         if (data.data_status === "ok") {
           latestPayload = data;
           const indicators = data.indicators || {};

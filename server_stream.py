@@ -33,17 +33,18 @@ TIMEFRAMES = {
     "15Min": 900,
 }
 
-subscribers = {tf: [] for tf in TIMEFRAMES}
-live_candles = {tf: None for tf in TIMEFRAMES}
-latest_trade = None
+subscribers = {}
+live_candles = {}
+latest_trades = {}
 latest_candle_audits = {}
 recent_validated_candles = {}
 candle_audit_lock = threading.Lock()
-stream_status = {
-    "connected": False,
-    "last_message": None,
-    "error": None,
-}
+stream_lock = threading.Lock()
+stream_ws = None
+stream_authenticated = False
+requested_stream_symbols = {SYMBOL}
+subscribed_stream_symbols = set()
+stream_status_by_symbol = {}
 AI_SNAPSHOT_CACHE_SECONDS = 20
 AI_PLAYBOOK_PATH = os.path.join(os.path.dirname(__file__), "docs", "ai_trading_playbook.md")
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -127,6 +128,102 @@ def normalize_symbol(value, default=SYMBOL):
     if not SYMBOL_PATTERN.fullmatch(symbol):
         raise ValueError("Invalid symbol. Use 1-10 letters, numbers, dots, or hyphens.")
     return symbol
+
+
+def empty_stream_status(symbol=SYMBOL, error="waiting for live stream"):
+    return {
+        "symbol": normalize_symbol(symbol),
+        "connected": False,
+        "last_message": None,
+        "error": error,
+    }
+
+
+def get_stream_status(symbol=SYMBOL):
+    symbol = normalize_symbol(symbol)
+    with stream_lock:
+        status = stream_status_by_symbol.setdefault(symbol, empty_stream_status(symbol))
+        return dict(status)
+
+
+def set_stream_status(symbol=SYMBOL, **updates):
+    symbol = normalize_symbol(symbol)
+    with stream_lock:
+        status = stream_status_by_symbol.setdefault(symbol, empty_stream_status(symbol))
+        status.update(updates)
+        status["symbol"] = symbol
+        return dict(status)
+
+
+def get_latest_trade(symbol=SYMBOL):
+    symbol = normalize_symbol(symbol)
+    with stream_lock:
+        trade = latest_trades.get(symbol)
+        return dict(trade) if isinstance(trade, dict) else None
+
+
+def get_live_candles_snapshot(symbol=SYMBOL):
+    symbol = normalize_symbol(symbol)
+    with stream_lock:
+        candles = live_candles.get(symbol) or {}
+        return {tf: dict(candle) if isinstance(candle, dict) else None for tf, candle in candles.items()}
+
+
+def reset_live_symbol_state(symbol=SYMBOL):
+    symbol = normalize_symbol(symbol)
+    with stream_lock:
+        live_candles[symbol] = {tf: None for tf in TIMEFRAMES}
+        latest_trades.pop(symbol, None)
+        stream_status_by_symbol.setdefault(symbol, empty_stream_status(symbol))
+
+
+def _subscriber_count_unlocked(symbol=None):
+    if symbol:
+        symbol = normalize_symbol(symbol)
+        return {
+            tf: len(subscribers.get((symbol, tf), []))
+            for tf in TIMEFRAMES
+        }
+    return {
+        f"{sym}:{tf}": len(queues)
+        for (sym, tf), queues in subscribers.items()
+    }
+
+
+def ensure_stream_symbol_subscribed(symbol=SYMBOL):
+    symbol = normalize_symbol(symbol)
+    ws = None
+    should_send = False
+    with stream_lock:
+        requested_stream_symbols.add(symbol)
+        live_candles.setdefault(symbol, {tf: None for tf in TIMEFRAMES})
+        stream_status_by_symbol.setdefault(symbol, empty_stream_status(symbol))
+        ws = stream_ws
+        should_send = bool(ws and stream_authenticated and symbol not in subscribed_stream_symbols)
+
+    if not should_send:
+        return False
+
+    try:
+        print(f"Starting stream for {symbol}")
+        ws.send(json.dumps({
+            "action": "subscribe",
+            "trades": [symbol],
+        }))
+        with stream_lock:
+            subscribed_stream_symbols.add(symbol)
+            status = stream_status_by_symbol.setdefault(symbol, empty_stream_status(symbol))
+            status.update({
+                "connected": True,
+                "error": None,
+                "symbol": symbol,
+            })
+        print(f"Subscribed live trades for {symbol}: trades: ['{symbol}']")
+        return True
+    except Exception as error:
+        set_stream_status(symbol, connected=False, error=str(error))
+        print(f"ALPACA SUBSCRIBE ERROR for {symbol}:", error)
+        return False
 
 
 def get_related_market_symbols(symbol):
@@ -2421,10 +2518,11 @@ def live_candle_is_suspicious(candle, symbol=SYMBOL):
     return bool(extreme_range and low_confirmation_volume), reasons
 
 
-def update_live_candles(price, size, trade_time_utc):
-    global latest_trade
+def update_live_candles(symbol, price, size, trade_time_utc):
+    symbol = normalize_symbol(symbol)
 
     latest_trade = {
+        "symbol": symbol,
         "price": price,
         "size": size,
         "timestamp": trade_time_utc.isoformat().replace("+00:00", "Z"),
@@ -2434,7 +2532,9 @@ def update_live_candles(price, size, trade_time_utc):
     suppression_reasons = []
     for tf, seconds in TIMEFRAMES.items():
         bucket = bucket_time(trade_time_utc, seconds)
-        candle = live_candles.get(tf)
+        with stream_lock:
+            symbol_live_candles = live_candles.setdefault(symbol, {frame: None for frame in TIMEFRAMES})
+            candle = symbol_live_candles.get(tf)
 
         if not candle or candle["time"] != bucket:
             candle = {
@@ -2451,23 +2551,34 @@ def update_live_candles(price, size, trade_time_utc):
             candle["close"] = price
             candle["volume"] = (candle.get("volume") or 0) + (size or 0)
 
-        live_candles[tf] = candle
+        with stream_lock:
+            latest_trades[symbol] = dict(latest_trade)
+            live_candles.setdefault(symbol, {frame: None for frame in TIMEFRAMES})[tf] = dict(candle)
         if tf == "1Min":
-            suppress_live_events, suppression_reasons = live_candle_is_suspicious(candle)
+            suppress_live_events, suppression_reasons = live_candle_is_suspicious(candle, symbol)
+            if suppression_reasons:
+                set_stream_status(
+                    symbol,
+                    connected=True,
+                    error=None,
+                    last_message=datetime.now(timezone.utc).isoformat(),
+                )
 
         event = {
             "type": "data_quality_warning" if suppress_live_events else "live_candle",
-            "symbol": SYMBOL,
+            "symbol": symbol,
             "timeframe": tf,
             "candle": None if suppress_live_events else candle,
             "latest_trade": latest_trade,
-            "stream_status": stream_status,
+            "stream_status": get_stream_status(symbol),
             "data_quality_status": "WARNING" if suppress_live_events else "CLEAN",
             "candle_data_warnings": suppression_reasons,
             "bad_print_filter_enabled": True,
         }
 
-        for q in list(subscribers.get(tf, [])):
+        with stream_lock:
+            queues = list(subscribers.get((symbol, tf), []))
+        for q in queues:
             try:
                 q.put_nowait(event)
             except Exception:
@@ -2475,9 +2586,16 @@ def update_live_candles(price, size, trade_time_utc):
 
 
 def on_open(ws):
+    global stream_ws, stream_authenticated
     print("ALPACA STREAM OPENED")
-    stream_status["connected"] = True
-    stream_status["error"] = None
+    with stream_lock:
+        stream_ws = ws
+        stream_authenticated = True
+        subscribed_stream_symbols.clear()
+        symbols = sorted(requested_stream_symbols or {SYMBOL})
+        for symbol in symbols:
+            status = stream_status_by_symbol.setdefault(symbol, empty_stream_status(symbol))
+            status.update({"connected": True, "error": None, "symbol": symbol})
 
     ws.send(json.dumps({
         "action": "auth",
@@ -2485,14 +2603,12 @@ def on_open(ws):
         "secret": ALPACA_SECRET,
     }))
 
-    ws.send(json.dumps({
-        "action": "subscribe",
-        "trades": [SYMBOL],
-    }))
+    for symbol in symbols:
+        ensure_stream_symbol_subscribed(symbol)
 
 
 def on_message(ws, message):
-    stream_status["last_message"] = datetime.now(timezone.utc).isoformat()
+    message_time = datetime.now(timezone.utc).isoformat()
 
     try:
         data = json.loads(message)
@@ -2507,8 +2623,17 @@ def on_message(ws, message):
             print("ALPACA STREAM MESSAGE:", item)
             continue
 
-        if item.get("S") != SYMBOL:
+        try:
+            symbol = normalize_symbol(item.get("S"))
+        except ValueError:
             continue
+
+        with stream_lock:
+            is_requested = symbol in requested_stream_symbols
+        if not is_requested:
+            continue
+
+        set_stream_status(symbol, connected=True, error=None, last_message=message_time)
 
         price = item.get("p")
         size = item.get("s", 0)
@@ -2523,26 +2648,36 @@ def on_message(ws, message):
             print(f"SKIP TRADE BAD TIMESTAMP: {ts} error={e}")
             continue
 
-        update_live_candles(float(price), int(size or 0), trade_time)
+        update_live_candles(symbol, float(price), int(size or 0), trade_time)
 
 
 def on_error(ws, error):
     print("ALPACA STREAM ERROR:", error)
-    stream_status["connected"] = False
-    stream_status["error"] = str(error)
+    with stream_lock:
+        symbols = set(requested_stream_symbols or {SYMBOL})
+    for symbol in symbols:
+        set_stream_status(symbol, connected=False, error=str(error))
 
 
 def on_close(ws, close_status_code, close_msg):
-    stream_status["connected"] = False
-    stream_status["error"] = f"closed: {close_status_code} {close_msg}"
+    global stream_ws, stream_authenticated
+    with stream_lock:
+        stream_ws = None
+        stream_authenticated = False
+        subscribed_stream_symbols.clear()
+        symbols = set(requested_stream_symbols or {SYMBOL})
+    for symbol in symbols:
+        set_stream_status(symbol, connected=False, error=f"closed: {close_status_code} {close_msg}")
 
 
 def stream_worker():
     while True:
         try:
             if not ALPACA_KEY or not ALPACA_SECRET:
-                stream_status["connected"] = False
-                stream_status["error"] = "missing Alpaca keys"
+                with stream_lock:
+                    symbols = set(requested_stream_symbols or {SYMBOL})
+                for symbol in symbols:
+                    set_stream_status(symbol, connected=False, error="missing Alpaca keys")
                 time.sleep(5)
                 continue
 
@@ -2558,8 +2693,10 @@ def stream_worker():
 
             ws.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as e:
-            stream_status["connected"] = False
-            stream_status["error"] = str(e)
+            with stream_lock:
+                symbols = set(requested_stream_symbols or {SYMBOL})
+            for symbol in symbols:
+                set_stream_status(symbol, connected=False, error=str(e))
 
         time.sleep(3)
 
@@ -7555,12 +7692,8 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
                 "read_only": True,
             },
             "current_price": current_price,
-            "latest_trade": latest_trade if active_symbol == SYMBOL else None,
-            "stream_status": stream_status if active_symbol == SYMBOL else {
-                "connected": False,
-                "error": "Historical polling mode for non-AAPL symbols.",
-                "last_message": None,
-            },
+            "latest_trade": get_latest_trade(active_symbol),
+            "stream_status": get_stream_status(active_symbol),
             "candles": candles,
             "levels": levels,
             "support_resistance": support_resistance,
@@ -7605,12 +7738,8 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
             "timeframe": timeframe,
             "timestamp": now.isoformat(),
             "current_price": None,
-            "latest_trade": latest_trade if active_symbol == SYMBOL else None,
-            "stream_status": stream_status if active_symbol == SYMBOL else {
-                "connected": False,
-                "error": "Historical polling mode for non-AAPL symbols.",
-                "last_message": None,
-            },
+            "latest_trade": get_latest_trade(active_symbol),
+            "stream_status": get_stream_status(active_symbol),
             "candles": [],
             "levels": {},
             "support_resistance": {"support": [], "resistance": []},
@@ -7654,9 +7783,7 @@ def rebuild_chart_data():
         for key in [key for key in _ai_snapshot_cache if key[0] == symbol]:
             _ai_snapshot_cache.pop(key, None)
 
-    if symbol == SYMBOL:
-        for timeframe in TIMEFRAMES:
-            live_candles[timeframe] = None
+    reset_live_symbol_state(symbol)
 
     rebuilt = {}
     warnings = []
@@ -7831,15 +7958,19 @@ def review_current_chart():
 @APP.route("/api/stream/aapl")
 def stream_chart():
     try:
-        active_symbol = normalize_symbol(request.args.get("symbol", SYMBOL))
+        active_symbol = normalize_symbol(SYMBOL if request.path.endswith("/aapl") else request.args.get("symbol", SYMBOL))
     except ValueError as error:
         return jsonify({"error": str(error), "read_only": True}), 400
     tf = request.args.get("timeframe", "1Min")
     timeframe = tf if tf in TIMEFRAMES else "1Min"
 
     q = queue.Queue(maxsize=100)
-    if active_symbol == SYMBOL:
-        subscribers[timeframe].append(q)
+    with stream_lock:
+        requested_stream_symbols.add(active_symbol)
+        live_candles.setdefault(active_symbol, {frame: None for frame in TIMEFRAMES})
+        stream_status_by_symbol.setdefault(active_symbol, empty_stream_status(active_symbol))
+        subscribers.setdefault((active_symbol, timeframe), []).append(q)
+    ensure_stream_symbol_subscribed(active_symbol)
 
     def event_stream():
         try:
@@ -7852,17 +7983,17 @@ def stream_chart():
                         "type": "heartbeat",
                         "symbol": active_symbol,
                         "timeframe": timeframe,
-                        "stream_status": stream_status if active_symbol == SYMBOL else {
-                            "connected": False,
-                            "error": "Historical polling mode; refreshes every 30 seconds.",
-                            "last_message": None,
-                        },
-                        "latest_trade": latest_trade if active_symbol == SYMBOL else None,
+                        "stream_status": get_stream_status(active_symbol),
+                        "latest_trade": get_latest_trade(active_symbol),
                     }
                     yield f"data: {json.dumps(heartbeat)}\n\n"
         finally:
-            if active_symbol == SYMBOL and q in subscribers.get(timeframe, []):
-                subscribers[timeframe].remove(q)
+            with stream_lock:
+                queues = subscribers.get((active_symbol, timeframe), [])
+                if q in queues:
+                    queues.remove(q)
+                if not queues:
+                    subscribers.pop((active_symbol, timeframe), None)
 
     return Response(event_stream(), mimetype="text/event-stream")
 
@@ -8900,13 +9031,31 @@ def debug_recent_setups():
 
 @APP.route("/api/debug/stream-status")
 def debug_stream_status():
+    symbol_arg = request.args.get("symbol")
+    try:
+        symbol = normalize_symbol(symbol_arg, SYMBOL) if symbol_arg else None
+    except ValueError as error:
+        return jsonify({"error": str(error), "read_only": True}), 400
+    with stream_lock:
+        requested = sorted(requested_stream_symbols)
+        subscribed = sorted(subscribed_stream_symbols)
+        statuses = {sym: dict(status) for sym, status in stream_status_by_symbol.items()}
+        trades = {sym: dict(trade) for sym, trade in latest_trades.items()}
+        candles = {
+            sym: {tf: dict(candle) if isinstance(candle, dict) else None for tf, candle in frames.items()}
+            for sym, frames in live_candles.items()
+        }
+        counts = _subscriber_count_unlocked(symbol)
     return jsonify({
-        "stream_status": stream_status,
-        "latest_trade": latest_trade,
-        "live_candles": live_candles,
-        "subscriber_counts": {k: len(v) for k, v in subscribers.items()},
+        "stream_status": get_stream_status(symbol or SYMBOL) if symbol else statuses,
+        "latest_trade": get_latest_trade(symbol or SYMBOL) if symbol else trades,
+        "live_candles": get_live_candles_snapshot(symbol) if symbol else candles,
+        "subscriber_counts": counts,
+        "requested_symbols": requested,
+        "subscribed_symbols": subscribed,
         "feed": FEED,
-        "symbol": SYMBOL,
+        "symbol": symbol or SYMBOL,
+        "read_only": True,
     })
 
 
