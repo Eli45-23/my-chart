@@ -77,6 +77,30 @@ class FvgEngineTests(unittest.TestCase):
         self.assertEqual(levels["hod"], 101.0)
         self.assertEqual(levels["lod"], 99.9)
 
+    def test_core_key_levels_are_clean_mode_audit_visible(self):
+        snapshot = {
+            "levels": {
+                "pmh": 103.0,
+                "pml": 98.5,
+                "pdh": 102.5,
+                "pdl": 97.8,
+                "hod": 101.2,
+                "lod": 99.1,
+                "opening_5m_high": 100.8,
+                "opening_5m_low": 99.9,
+            },
+            "indicators": {},
+        }
+
+        audit = server_stream.build_chart_line_registry(snapshot, "AAPL", "5Min")
+        lines_by_type = {line["type"]: line for line in audit["chart_lines"]}
+
+        for line_type in ["PMH", "PML", "PDH", "PDL", "HOD", "LOD", "OPEN 5M HIGH", "OPEN 5M LOW"]:
+            self.assertIn(line_type, lines_by_type)
+            self.assertTrue(lines_by_type[line_type]["visible_in_clean_mode"])
+            self.assertEqual(lines_by_type[line_type]["priority"], 1)
+            self.assertEqual(lines_by_type[line_type]["status"], "ACTIVE")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ const countdownEl = document.getElementById("countdown");
 const streamStatusEl = document.getElementById("streamStatus");
 const dataQualityStatusEl = document.getElementById("dataQualityStatus");
 const chartEmptyEl = document.getElementById("chartEmpty");
+const keyLevelEdgeMarkers = document.getElementById("keyLevelEdgeMarkers");
 const tfButtons = document.querySelectorAll(".tf-btn");
 const toggleButtons = document.querySelectorAll(".toggle-btn[data-layer]");
 const cleanModeToggle = document.getElementById("cleanModeToggle");
@@ -95,6 +96,10 @@ let didInitialLoad = false;
 let latestPayload = null;
 let aiEntryPriceLine = null;
 let labeledPrices = [];
+
+const CORE_CLEAN_KEY_LEVEL_TYPES = new Set([
+  "PMH", "PML", "PDH", "PDL", "HOD", "LOD", "OPEN 5M HIGH", "OPEN 5M LOW",
+]);
 
 const timeframeSeconds = {
   "1Min": 60,
@@ -262,6 +267,10 @@ function isValidAuditLine(line) {
   );
 }
 
+function isCoreCleanKeyLevel(line) {
+  return CORE_CLEAN_KEY_LEVEL_TYPES.has(line?.type);
+}
+
 function lineDisplayDecision(line) {
   if (!isValidAuditLine(line)) return { visible: false, hiddenReason: "invalid audit metadata" };
   if (!line.visible_in_full_mode) return { visible: false, hiddenReason: "not visible in full mode" };
@@ -275,6 +284,11 @@ function lineDisplayDecision(line) {
   ]);
   if (!cleanTypes.has(line.type)) return { visible: false, hiddenReason: "hidden in trader Clean Mode" };
   if (!line.source || !line.reason) return { visible: false, hiddenReason: "no valid source" };
+  if (isCoreCleanKeyLevel(line)) {
+    return line.visible_in_clean_mode
+      ? { visible: true, hiddenReason: null }
+      : { visible: false, hiddenReason: "not marked visible in Clean Mode" };
+  }
   if (line.status === "FAILED") return { visible: false, hiddenReason: "failed" };
   if (line.strength === "WEAK") return { visible: false, hiddenReason: "weak" };
   if (line.priority === 3) return { visible: false, hiddenReason: "low priority" };
@@ -334,6 +348,7 @@ function clearPriceLines() {
   }
   priceLines = [];
   labeledPrices = [];
+  if (keyLevelEdgeMarkers) keyLevelEdgeMarkers.innerHTML = "";
 }
 
 function removeAiEntryMarker() {
@@ -424,12 +439,13 @@ function addLevel(label, price, color, style = LightweightCharts.LineStyle.Solid
   const decision = lineDisplayDecision(auditLine);
   if (!decision.visible) return;
 
+  const isCoreKey = cleanMode && isCoreCleanKeyLevel(auditLine);
   const priority = auditLine.priority || 3;
-  const strongerNearby = visibleAuditLines().some(line =>
+  const strongerNearby = !isCoreKey && visibleAuditLines().some(line =>
     line.id !== auditLine.id && (line.priority || 3) < priority &&
     Math.abs(lineAnchorPrice(line) - numericPrice) < 0.025
   );
-  const overlapsLabel = labeledPrices.some(item =>
+  const overlapsLabel = !isCoreKey && labeledPrices.some(item =>
     Math.abs(item.price - numericPrice) < 0.022 && item.priority <= priority
   );
   const labelEligible = priority <= 2 && !["FAILED", "MUTED"].includes(auditLine.status) && auditLine.strength !== "WEAK";
@@ -446,6 +462,49 @@ function addLevel(label, price, color, style = LightweightCharts.LineStyle.Solid
     title: labelVisible ? smartLabel : "",
   });
   priceLines.push(line);
+}
+
+function coreKeyLevelsFromPayload(data = latestPayload) {
+  return (data?.chart_lines || [])
+    .filter(line => isCoreCleanKeyLevel(line) && lineDisplayDecision(line).visible)
+    .map(line => ({
+      label: line.short_label || line.label || line.type,
+      price: lineAnchorPrice(line),
+    }))
+    .filter(item => Number.isFinite(item.price))
+    .sort((a, b) => b.price - a.price);
+}
+
+function renderCoreKeyLevelEdgeMarkers() {
+  if (!keyLevelEdgeMarkers) return;
+  keyLevelEdgeMarkers.innerHTML = "";
+  if (!cleanMode || !latestPayload) return;
+
+  const chartHeight = chartEl.clientHeight;
+  if (!chartHeight) return;
+
+  const top = [];
+  const bottom = [];
+  coreKeyLevelsFromPayload().forEach(level => {
+    const coordinate = candleSeries.priceToCoordinate(level.price);
+    if (!Number.isFinite(coordinate)) return;
+    if (coordinate < 8) top.push(level);
+    if (coordinate > chartHeight - 8) bottom.push(level);
+  });
+
+  const markerHtml = [
+    ...top.slice(0, 4).map((level, index) =>
+      `<div class="key-level-edge-marker top" style="top:${8 + index * 24}px">${escapeHtml(level.label)} ${level.price.toFixed(2)} ↑</div>`
+    ),
+    ...bottom.slice(-4).map((level, index) =>
+      `<div class="key-level-edge-marker bottom" style="bottom:${8 + index * 24}px">${escapeHtml(level.label)} ${level.price.toFixed(2)} ↓</div>`
+    ),
+  ].join("");
+  keyLevelEdgeMarkers.innerHTML = markerHtml;
+}
+
+function scheduleCoreKeyLevelEdgeMarkers() {
+  requestAnimationFrame(renderCoreKeyLevelEdgeMarkers);
 }
 
 
@@ -967,13 +1026,15 @@ function drawStaticLevels(data) {
   clearPriceLines();
 
   const levels = data.levels || {};
+  const showPremarketLevels = cleanMode || layerState.premarket;
+  const showSessionKeyLevels = cleanMode || layerState.previousDay;
 
-  if (layerState.premarket) {
+  if (showPremarketLevels) {
     addLevel("PMH", levels.pmh, COLORS.pmhPml);
     addLevel("PML", levels.pml, COLORS.pmhPml);
   }
 
-  if (layerState.previousDay) {
+  if (showSessionKeyLevels) {
     addLevel("PDH", levels.pdh, COLORS.previousHighLow, LightweightCharts.LineStyle.Dashed);
     addLevel("PDL", levels.pdl, COLORS.previousHighLow, LightweightCharts.LineStyle.Dashed);
     if (!cleanMode) addLevel("PDC", levels.pdc, COLORS.previousClose, LightweightCharts.LineStyle.Dotted);
@@ -1071,6 +1132,7 @@ function drawStaticLevels(data) {
   }
 
   applyIndicatorVisibility();
+  scheduleCoreKeyLevelEdgeMarkers();
 }
 
 async function loadInitialChart() {
@@ -1105,6 +1167,7 @@ async function loadInitialChart() {
       })} ET`;
 
   focusRecentCandles(data.candles);
+  scheduleCoreKeyLevelEdgeMarkers();
 }
 
 function connectStream() {
@@ -1262,6 +1325,7 @@ candleCompareClose.addEventListener("click", closeCandleCompare);
 
 window.addEventListener("resize", () => {
   chart.applyOptions({ width: chartEl.clientWidth });
+  scheduleCoreKeyLevelEdgeMarkers();
 });
 
 setInterval(updateCountdown, 1000);

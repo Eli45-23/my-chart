@@ -175,6 +175,28 @@
     .chart-empty.visible { display: flex; }
     .chart-empty strong { display: block; font-size: 17px; margin-bottom: 7px; }
     .chart-empty span { color: var(--muted); font-size: 13px; }
+    .key-level-edge-markers {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      pointer-events: none;
+    }
+    .key-level-edge-marker {
+      position: absolute;
+      right: 72px;
+      padding: 3px 7px;
+      border: 1px solid rgba(159, 181, 207, .34);
+      border-radius: 999px;
+      background: rgba(9, 14, 21, .86);
+      color: #cbd8e8;
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: .02em;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .28);
+      white-space: nowrap;
+    }
+    .key-level-edge-marker.top { border-color: rgba(201, 166, 93, .42); }
+    .key-level-edge-marker.bottom { border-color: rgba(111, 142, 175, .42); }
     .legend-wrap {
       border-top: 1px solid var(--border);
       padding: 9px 12px 12px;
@@ -404,6 +426,7 @@
 
   <div class="chart-shell">
     <div id="chart"></div>
+    <div id="keyLevelEdgeMarkers" class="key-level-edge-markers" aria-hidden="true"></div>
     <div class="brand-watermark" aria-hidden="true">E$</div>
     <div id="chartEmpty" class="chart-empty">
       <div><strong>Waiting for market data</strong><span>Market may be closed or no live candles are available.</span></div>
@@ -430,6 +453,6 @@
   </div>
   <div class="error" id="error"></div>
 
-  <script src="/app_stream.js?v=stream43"></script>
+  <script src="/app_stream.js?v=stream44"></script>
 </body>
 </html>
