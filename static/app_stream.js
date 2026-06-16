@@ -6,6 +6,7 @@ const countdownEl = document.getElementById("countdown");
 const streamStatusEl = document.getElementById("streamStatus");
 const dataQualityStatusEl = document.getElementById("dataQualityStatus");
 const chartEmptyEl = document.getElementById("chartEmpty");
+const fvgOverlay = document.getElementById("fvgOverlay");
 const keyLevelEdgeMarkers = document.getElementById("keyLevelEdgeMarkers");
 const tfButtons = document.querySelectorAll(".tf-btn");
 const toggleButtons = document.querySelectorAll(".toggle-btn[data-layer]");
@@ -289,6 +290,8 @@ function lineDisplayDecision(line) {
       ? { visible: true, hiddenReason: null }
       : { visible: false, hiddenReason: "not marked visible in Clean Mode" };
   }
+  if (["BULLISH_FVG", "BEARISH_FVG"].includes(line.type) && line.status === "FILLED") return { visible: false, hiddenReason: "filled FVG" };
+  if (["BULLISH_FVG", "BEARISH_FVG"].includes(line.type) && line.status === "INVALID") return { visible: false, hiddenReason: "invalid FVG" };
   if (line.status === "FAILED") return { visible: false, hiddenReason: "failed" };
   if (line.strength === "WEAK") return { visible: false, hiddenReason: "weak" };
   if (line.priority === 3) return { visible: false, hiddenReason: "low priority" };
@@ -348,6 +351,7 @@ function clearPriceLines() {
   }
   priceLines = [];
   labeledPrices = [];
+  if (fvgOverlay) fvgOverlay.innerHTML = "";
   if (keyLevelEdgeMarkers) keyLevelEdgeMarkers.innerHTML = "";
 }
 
@@ -611,20 +615,73 @@ function addReactionZone(label, zone, color) {
   addLevel(rangeLabel, mid, color, LightweightCharts.LineStyle.Dashed, true);
 }
 
-function addFvgBand(gap) {
-  if (!gap) return;
-  const low = gap.bottom;
-  const high = gap.top;
-  if (low === null || low === undefined || high === null || high === undefined) return;
-  if (cleanMode && !(gap.worth_showing && ["ACTIVE", "PARTIALLY_FILLED"].includes(gap.status))) return;
-  const label = gap.type === "BULLISH_FVG" ? "BULL FVG" : "BEAR FVG";
-  const weak = gap.quality_grade === "WEAK" || ["FILLED", "INVALID"].includes(gap.status);
-  const color = weak ? COLORS.weakFvg : gap.type === "BULLISH_FVG" ? COLORS.bullFvg : COLORS.bearFvg;
-  const mid = (Number(low) + Number(high)) / 2;
-  const style = weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed;
-  addLevel(`${label} Top ${gap.quality_grade || ""}`, high, color, LightweightCharts.LineStyle.Dotted, false);
-  addLevel(`${label} Bottom ${gap.quality_grade || ""}`, low, color, LightweightCharts.LineStyle.Dotted, false);
-  addLevel(`${label} ${gap.quality_grade || ""}`, mid, color, style, !weak, weak ? 1 : 2);
+function shouldRenderFvg(gap) {
+  if (!gap) return false;
+  if (cleanMode && !(gap.worth_showing && ["ACTIVE", "PARTIALLY_FILLED"].includes(gap.status))) return false;
+  if (cleanMode && gap.quality_grade === "WEAK") return false;
+  const currentPrice = latestPayload?.current_price || latestPayload?.latest_trade?.price || latestPayload?.candles?.slice(-1)?.[0]?.close;
+  if (cleanMode && !isLineNearCurrentPrice({ top: gap.top, bottom: gap.bottom }, currentPrice, activeSymbol)) return false;
+  return true;
+}
+
+function fvgChartTime(gap) {
+  return gap?.candle3_time ?? gap?.created_at ?? null;
+}
+
+function renderFvgOverlay(data = latestPayload) {
+  if (!fvgOverlay) return;
+  fvgOverlay.innerHTML = "";
+  if (!data || !isLayerVisible("fvg")) return;
+
+  const chartHeight = chartEl.clientHeight;
+  const chartWidth = chartEl.clientWidth;
+  if (!chartHeight || !chartWidth) return;
+
+  const gaps = [
+    ...((data.fair_value_gaps || {}).bullish || []),
+    ...((data.fair_value_gaps || {}).bearish || []),
+  ].filter(shouldRenderFvg);
+
+  fvgOverlay.innerHTML = gaps.map(gap => {
+    const topPrice = Number(gap.top);
+    const bottomPrice = Number(gap.bottom);
+    const midpoint = Number(gap.midpoint ?? ((topPrice + bottomPrice) / 2));
+    if (!Number.isFinite(topPrice) || !Number.isFinite(bottomPrice) || topPrice <= bottomPrice) return "";
+
+    const topCoordinate = candleSeries.priceToCoordinate(topPrice);
+    const bottomCoordinate = candleSeries.priceToCoordinate(bottomPrice);
+    const midpointCoordinate = candleSeries.priceToCoordinate(midpoint);
+    if (![topCoordinate, bottomCoordinate, midpointCoordinate].every(Number.isFinite)) return "";
+
+    const upper = Math.min(topCoordinate, bottomCoordinate);
+    const lower = Math.max(topCoordinate, bottomCoordinate);
+    if (lower < 0 || upper > chartHeight) return "";
+
+    const timeCoordinate = chart.timeScale().timeToCoordinate(fvgChartTime(gap));
+    const left = Number.isFinite(timeCoordinate) ? Math.max(0, timeCoordinate) : 0;
+    const rightPadding = 82;
+    const width = Math.max(34, chartWidth - left - rightPadding);
+    const height = Math.max(4, lower - upper);
+    const midpointTop = Math.max(0, Math.min(height, midpointCoordinate - upper));
+    const bearish = gap.type === "BEARISH_FVG";
+    const muted = gap.quality_grade === "WEAK" || ["FILLED", "INVALID"].includes(gap.status);
+    const label = bearish ? "BEAR FVG" : "BULL FVG";
+    const classes = ["fvg-box", bearish ? "bearish" : "bullish", muted ? "muted" : ""].filter(Boolean).join(" ");
+
+    return `
+      <div class="${classes}" style="left:${left}px; top:${Math.max(0, upper)}px; width:${width}px; height:${height}px" title="${escapeHtml(label)} ${escapeHtml(gap.status || "")} ${escapeHtml(gap.quality_grade || "")}">
+        <div class="fvg-midpoint" style="top:${midpointTop}px"></div>
+        <div class="fvg-label">${escapeHtml(label)}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+function scheduleChartOverlays() {
+  requestAnimationFrame(() => {
+    renderFvgOverlay();
+    renderCoreKeyLevelEdgeMarkers();
+  });
 }
 
 function textPill(text, tone = "") {
@@ -644,6 +701,20 @@ function linePriceText(line) {
     return `${Number(line.bottom).toFixed(2)}-${Number(line.top).toFixed(2)}`;
   }
   return "n/a";
+}
+
+function fvgAuditProofHtml(line) {
+  if (!["BULLISH_FVG", "BEARISH_FVG"].includes(line?.type)) return "";
+  const details = line.extra_details || {};
+  return `
+    <br><strong>FVG validation proof</strong><br>
+    Direction: ${escapeHtml(details.direction || "n/a")}<br>
+    Rule passed: ${details.rule_passed === true ? "true" : "false"}<br>
+    C1 high/low: ${escapeHtml(details.candle1_high ?? "n/a")} / ${escapeHtml(details.candle1_low ?? "n/a")}<br>
+    C3 high/low: ${escapeHtml(details.candle3_high ?? "n/a")} / ${escapeHtml(details.candle3_low ?? "n/a")}<br>
+    Top / bottom / midpoint: ${escapeHtml(details.top ?? line.top ?? "n/a")} / ${escapeHtml(details.bottom ?? line.bottom ?? "n/a")} / ${escapeHtml(details.midpoint ?? line.price ?? "n/a")}<br>
+    Fill: ${escapeHtml(details.fill_percentage ?? "n/a")}% · Status: ${escapeHtml(line.status)}<br>
+  `;
 }
 
 function renderLineAudit(selectedId = null) {
@@ -677,6 +748,7 @@ function renderLineAudit(selectedId = null) {
     Reason: ${escapeHtml(selected.reason)}<br>
     Status: ${escapeHtml(selected.status)} · Strength: ${escapeHtml(selected.strength)} · Confidence: ${escapeHtml(selected.confidence ?? "n/a")}%<br>
     Defended edge: ${escapeHtml(selected.defended_edge ?? "n/a")} · Failure edge: ${escapeHtml(selected.failure_edge ?? "n/a")}<br>
+    ${fvgAuditProofHtml(selected)}
     Timeframe: ${escapeHtml(selected.timeframe)}<br>
     Warnings: ${escapeHtml((selected.warnings || []).join(" | ") || "none")}<br>
     Read-only chart context.
@@ -1086,8 +1158,9 @@ function drawStaticLevels(data) {
   }
 
   if (isLayerVisible("fvg")) {
-    const fvg = data.fair_value_gaps || {};
-    [...(fvg.bullish || []), ...(fvg.bearish || [])].forEach(addFvgBand);
+    renderFvgOverlay(data);
+  } else if (fvgOverlay) {
+    fvgOverlay.innerHTML = "";
   }
 
   if (isLayerVisible("liquiditySweeps")) {
@@ -1132,7 +1205,7 @@ function drawStaticLevels(data) {
   }
 
   applyIndicatorVisibility();
-  scheduleCoreKeyLevelEdgeMarkers();
+  scheduleChartOverlays();
 }
 
 async function loadInitialChart() {
@@ -1167,7 +1240,7 @@ async function loadInitialChart() {
       })} ET`;
 
   focusRecentCandles(data.candles);
-  scheduleCoreKeyLevelEdgeMarkers();
+  scheduleChartOverlays();
 }
 
 function connectStream() {
@@ -1325,7 +1398,11 @@ candleCompareClose.addEventListener("click", closeCandleCompare);
 
 window.addEventListener("resize", () => {
   chart.applyOptions({ width: chartEl.clientWidth });
-  scheduleCoreKeyLevelEdgeMarkers();
+  scheduleChartOverlays();
+});
+
+chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+  scheduleChartOverlays();
 });
 
 setInterval(updateCountdown, 1000);

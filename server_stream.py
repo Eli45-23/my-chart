@@ -790,19 +790,31 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
         candle2 = candles[index - 1]
         candle3 = candles[index]
         gap_type = None
+        direction = None
         bottom = top = None
-        if candle1.get("high") is not None and candle3.get("low") is not None and candle1["high"] < candle3["low"]:
+        c1_high = candle1.get("high")
+        c1_low = candle1.get("low")
+        c3_high = candle3.get("high")
+        c3_low = candle3.get("low")
+        bullish_rule_passed = c1_high is not None and c3_low is not None and c1_high < c3_low
+        bearish_rule_passed = c1_low is not None and c3_high is not None and c1_low > c3_high
+        if bullish_rule_passed:
             gap_type = "BULLISH_FVG"
-            bottom = candle1["high"]
-            top = candle3["low"]
-        elif candle1.get("low") is not None and candle3.get("high") is not None and candle1["low"] > candle3["high"]:
+            direction = "bullish"
+            bottom = c1_high
+            top = c3_low
+        elif bearish_rule_passed:
             gap_type = "BEARISH_FVG"
-            bottom = candle3["high"]
-            top = candle1["low"]
+            direction = "bearish"
+            bottom = c3_high
+            top = c1_low
         if not gap_type or top is None or bottom is None or top <= bottom:
             continue
 
         created_at = candle3.get("time")
+        candle1_time = candle1.get("time")
+        candle2_time = candle2.get("time")
+        candle3_time = candle3.get("time")
         following = candles[index + 1:]
         height = max(0.0001, top - bottom)
         touch_count = 0
@@ -857,6 +869,8 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             quality_score -= 35
         if touch_count >= 3:
             quality_score -= 10
+        if gap_vs_atr < 0.08:
+            quality_score = min(quality_score, 49)
         quality_score = max(0, min(100, quality_score))
         grade = fvg_quality_grade(quality_score)
         warnings = []
@@ -864,6 +878,8 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             warnings.append("FVG is filled; audit context only.")
         if touch_count >= 3:
             warnings.append("FVG has multiple touches.")
+        if gap_vs_atr < 0.08:
+            warnings.append("Tiny FVG relative to ATR; hidden in Clean Mode.")
         if grade == "WEAK":
             warnings.append("Weak FVG quality.")
 
@@ -871,7 +887,15 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             "id": f"{symbol}-{timeframe}-{gap_type}-{created_at}-{round_price(bottom)}-{round_price(top)}",
             "symbol": symbol,
             "timeframe": timeframe,
+            "direction": direction,
             "type": gap_type,
+            "candle1_time": candle1_time,
+            "candle2_time": candle2_time,
+            "candle3_time": candle3_time,
+            "candle1_high": round_price(c1_high),
+            "candle1_low": round_price(c1_low),
+            "candle3_high": round_price(c3_high),
+            "candle3_low": round_price(c3_low),
             "top": round_price(top),
             "bottom": round_price(bottom),
             "midpoint": round_price(midpoint),
@@ -888,6 +912,11 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             "freshness_score": freshness_score,
             "size_score": size_score,
             "worth_showing": status in {"ACTIVE", "PARTIALLY_FILLED"} and grade in {"A", "B", "C"},
+            "source": "fvg_engine",
+            "reason": "strict_3_candle_imbalance",
+            "rule_passed": True,
+            "bullish_rule_passed": bool(bullish_rule_passed),
+            "bearish_rule_passed": bool(bearish_rule_passed),
             "warnings": warnings,
             "read_only": True,
         })
@@ -5121,6 +5150,7 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
         clean=True,
         full=True,
         item_warnings=None,
+        extra_details=None,
     ):
         values = [value for value in [price, top, bottom] if numeric(value)]
         if not values:
@@ -5154,6 +5184,7 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
             "visible_in_clean_mode": bool(clean),
             "visible_in_full_mode": bool(full),
             "warnings": list(item_warnings or []),
+            "extra_details": dict(extra_details or {}),
             "read_only": True,
         })
 
@@ -5253,12 +5284,13 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
             gap_type or "FVG",
             f"{label} {grade}",
             label,
-            "fair_value_gap_engine",
-            "Deterministic three-candle imbalance detection using validated/rebuilt candles",
-            "; ".join(gap.get("confluence") or []) or f"{status} {label} from candle1/candle3 gap",
+            gap.get("source") or "fvg_engine",
+            "Strict three-candle imbalance using validated/rebuilt candles only",
+            gap.get("reason") or f"{status} {label} from candle1/candle3 gap",
+            price=gap.get("midpoint"),
             top=gap.get("top"),
             bottom=gap.get("bottom"),
-            start_time=gap.get("created_at"),
+            start_time=gap.get("candle3_time") or gap.get("created_at"),
             end_time=gap.get("last_touch_time"),
             confidence=gap.get("quality_score"),
             strength=grade,
@@ -5266,6 +5298,23 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
             priority=1 if active and grade in {"A", "B"} else 2 if active and grade == "C" else 3,
             clean=active and grade in {"A", "B", "C"} and bool(gap.get("worth_showing")),
             item_warnings=gap.get("warnings") or [],
+            extra_details={
+                "direction": gap.get("direction"),
+                "candle1_time": gap.get("candle1_time"),
+                "candle2_time": gap.get("candle2_time"),
+                "candle3_time": gap.get("candle3_time"),
+                "candle1_high": gap.get("candle1_high"),
+                "candle1_low": gap.get("candle1_low"),
+                "candle3_high": gap.get("candle3_high"),
+                "candle3_low": gap.get("candle3_low"),
+                "rule_passed": gap.get("rule_passed"),
+                "top": gap.get("top"),
+                "bottom": gap.get("bottom"),
+                "midpoint": gap.get("midpoint"),
+                "fill_percentage": gap.get("fill_percentage"),
+                "source": gap.get("source"),
+                "reason": gap.get("reason"),
+            },
         )
 
     sweeps = snapshot.get("liquidity_sweeps") or {}
@@ -5641,10 +5690,15 @@ def compact_intraday_ai_context(payload):
         "zone_reactions": zone_reactions,
         "fair_value_gaps": [
             {
+                "direction": gap.get("direction"),
                 "type": gap.get("type"),
                 "top": gap.get("top"),
                 "bottom": gap.get("bottom"),
                 "midpoint": gap.get("midpoint"),
+                "candle1_time": gap.get("candle1_time"),
+                "candle3_time": gap.get("candle3_time"),
+                "source": gap.get("source"),
+                "reason": gap.get("reason"),
                 "status": gap.get("status"),
                 "quality_grade": gap.get("quality_grade"),
                 "quality_score": gap.get("quality_score"),
