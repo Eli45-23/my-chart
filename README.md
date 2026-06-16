@@ -1,14 +1,25 @@
-# My Chart — Live Trading Review Dashboard
+# My Chart — Trader-First Live Trading Review
 
-A read-only live market chart and AI-assisted review dashboard for studying intraday price action, supply/demand zones, liquidity sweeps, and options trade context.
+A read-only live market chart and review dashboard for studying intraday price action with accurate candles, key market levels, Fair Value Gaps, supply/demand, support/resistance, and optional AI-assisted review.
 
-This project is designed for manual trading education, live chart review, and testing market-structure tools before moving anything into a larger scanner system.
+The project is built for manual chart review and trading education. It is not an auto-trader.
 
-## What It Does
+## Current Focus
 
-My Chart displays live and recent market data with professional price-action overlays. It helps review possible bullish or bearish setups using candles, wicks, market structure, VWAP, moving averages, prior-session levels, supply/demand zones, liquidity sweeps, volume context, and AI-assisted commentary.
+The chart is being simplified around the tools that matter most for live decision-making:
 
-AAPL is the default symbol. The chart also supports common stocks and ETFs such as SPY, QQQ, TSLA, NVDA, MSFT, and AMD.
+- Accurate candles
+- PDH / PDL
+- PMH / PML
+- High of day / low of day
+- First 5-minute candle high / low
+- Fair Value Gaps / FVGs
+- Supply and demand zones
+- Support and resistance
+- Line Audit / Candle Compare for trust and debugging
+- Optional AI review for read-only commentary
+
+Everything else is secondary, muted, hidden in Clean Mode, or reserved for Full Mode / audit review.
 
 ## Safety
 
@@ -20,77 +31,271 @@ It does **not**:
 - send Alpaca orders
 - connect to Webull
 - automate entries or exits
-- send Telegram alerts
 - override manual user confirmation
+- allow AI to override backend gates
 
-Every review should be treated as educational context only.
+Every review is educational chart context only.
+
+> Read-only review. Not financial advice. Not an order. Confirm manually. Do not chase.
 
 ## Main Features
 
-- Live Alpaca SIP trade stream
-- AAPL default chart
-- Multi-symbol chart support
-- 1Min, 5Min, and 15Min chart timeframes
+### Market Data And Symbols
+
+- Alpaca live data integration
+- AAPL default symbol
+- Multi-symbol support for AAPL, SPY, QQQ, NVDA, MSFT, AMD, TSLA, and other supported stock/ETF symbols
+- Symbol-aware chart APIs
+- Related-market context per symbol when available
+- 1Min, 5Min, and 15Min timeframes
 - Eastern Time chart formatting
-- Matching hover tooltip and bottom-axis time labels
-- VWAP
-- EMA 9 / EMA 20
+
+### Candle Accuracy And Data Integrity
+
+Candles are treated as the foundation of the chart.
+
+- Raw Alpaca candles are preserved for audit.
+- `1Min` candles are validated before display/calculation use.
+- `5Min` and `15Min` candles are rebuilt from validated `1Min` candles.
+- Suspicious/rejected candles are blocked from corrupting indicators, levels, zones, AI, setup grading, and marker gates.
+- The chart exposes candle quality states: `CLEAN`, `WARNING`, and `DEGRADED`.
+- The chart shows whether candles are `VALIDATED` or `REBUILT_FROM_1MIN`.
+- The known bad AAPL raw Alpaca print at `290.403` is preserved for audit and rejected from display/calculations.
+
+Useful debug endpoint:
+
+```text
+/api/debug/candles?symbol=AAPL&timeframe=5Min
+```
+
+### Trader Clean Mode
+
+Clean Mode is the default trading view. It is intended to show only the most useful live trading structure.
+
+Clean Mode focuses on:
+
+- candles
+- current price
+- PDH / PDL
 - PMH / PML
-- PDH / PDL / PDC
-- Support and resistance reliability scoring
-- Supply and demand zones
-- Zone Reaction Engine
+- HOD / LOD
+- opening 5-minute high / low
+- active FVGs
+- relevant supply/demand zones
+- relevant support/resistance
+- candle data warnings
+- backend-approved read-only marker only if all strict gates pass
+
+Clean Mode hides or mutes:
+
+- failed zones
+- weak zones
+- research-only context
+- low-priority clutter
+- duplicate nearby levels
+- blocked setup triggers
+- weak/filled FVGs
+
+Full Mode remains available for audit/debugging and can show more deterministic context.
+
+### Key Levels
+
+The chart tracks and displays core levels:
+
+- `PDH` — previous day high
+- `PDL` — previous day low
+- `PDC` — previous day close, shown in audit/context when useful
+- `PMH` — premarket high
+- `PML` — premarket low
+- `HOD` — high of day from validated candles
+- `LOD` — low of day from validated candles
+- `OPEN 5M HIGH` — high of the completed 9:30–9:35 ET candle
+- `OPEN 5M LOW` — low of the completed 9:30–9:35 ET candle
+
+These are core trading levels and should not be treated as research clutter.
+
+### Fair Value Gap / FVG Engine
+
+The chart includes a deterministic FVG engine for 1Min, 5Min, and 15Min.
+
+A bullish FVG is based on the strict 3-candle imbalance:
+
+```text
+candle 1 high < candle 3 low
+bottom = candle 1 high
+top = candle 3 low
+midpoint = (top + bottom) / 2
+```
+
+A bearish FVG is based on:
+
+```text
+candle 1 low > candle 3 high
+top = candle 1 low
+bottom = candle 3 high
+midpoint = (top + bottom) / 2
+```
+
+The FVG box represents only the imbalance between candle 1 and candle 3. It is not the whole impulse move and it is not the demand/supply base.
+
+FVG objects include status and context such as:
+
+- `ACTIVE`
+- `PARTIALLY_FILLED`
+- `FILLED`
+- top / bottom / midpoint
+- fill percentage
+- touch count
+- quality score / grade
+- confluence context
+- Line Audit metadata
+
+FVGs are context only. They are not automatic entries.
+
+### Supply / Demand And Zone Reactions
+
+The chart detects and audits supply/demand zones and reaction behavior.
+
+Reaction labels include:
+
 - Demand `HOLD`
 - Demand `RECLAIM`
+- Demand `FAILED`
 - Supply `HOLD`
 - Supply `REJECTION`
-- Failed zones
-- Liquidity sweep zones
-- Merged price clusters
-- 30-minute reaction zones
-- AI-assisted chart review
-- Read-only volume/RVOL confirmation context
-- Options contract-quality context when available
-- `/performance` dashboard
+- Supply `FAILED`
+
+Failed and weak zones are not allowed to create misleading trade excitement. Failed demand cannot create bullish demand setups, and failed supply cannot create bearish supply setups. Weak zones are capped at watch context.
+
+### Support And Resistance
+
+Support/resistance levels are scored and audited. Trader Clean Mode should show the nearest relevant support/resistance context without flooding the chart with every possible level.
+
+### Chart Line Audit
+
+The deterministic Chart Line Audit explains every plotted line/zone/level that the chart knows about.
+
+It tracks:
+
+- id
+- type
+- label
+- price or range
+- source
+- calculation method
+- reason
+- status
+- confidence
+- priority
+- Clean Mode visibility
+- hidden reason, when hidden
+
+Open the **Line Audit** panel on the chart, or use:
+
+```text
+/api/debug/chart-lines?symbol=AAPL&timeframe=5Min
+```
+
+No source means no line. No valid calculation means the item should not be trusted or displayed as actionable.
+
+### Candle Compare
+
+The Candle Compare tool is used to inspect raw vs validated/rebuilt candle behavior and to confirm that rejected Alpaca bad prints are not being displayed or used in calculations.
+
+Use it from the chart UI or related debug endpoints.
+
+### Rebuild Chart Data
+
+The **Rebuild Chart Data** button clears/rebuilds chart data from validated candles. Use it before the open or whenever the chart needs a clean reload.
+
+Recommended before market open:
+
+```text
+9:25–9:29 AM ET: click Rebuild Chart Data
+```
+
+### Performance Dashboard
+
+The `/performance` dashboard reviews logged setup outcomes.
+
+Views include:
+
+- Tradable Setups
+- Research / NO_TRADE
+- All
+
+The default view is focused on tradable setups and excludes `NO_TRADE` rows by default. Research/no-trade outcomes remain available separately for tuning and missed-move study.
+
+Open:
+
+```text
+http://127.0.0.1:8900/performance
+```
+
+### AI Trade Review
+
+AI Trade Review is optional and read-only. It uses chart data, market context, candle warnings, zones, levels, FVG context, risk rules, and the trading playbook to explain what the chart is showing.
+
+AI can discuss:
+
+- trend
+- candles/wicks
+- FVG context
+- support/resistance
+- supply/demand
+- market context
+- no-trade conditions
+- options contract quality when available
+- risk/reward
+
+AI cannot place trades, send broker orders, connect to Webull, or override backend safety gates.
+
+If no fresh OpenAI review has been requested, latest-review may return a fallback message such as `No fresh AI review requested.`
 
 ## Main Files
 
-- `server_stream.py` — Flask backend, Alpaca stream, chart APIs, indicators, zones, AI review context
+- `server_stream.py` — Flask backend, Alpaca stream, chart APIs, candle validation, levels, zones, FVGs, AI review context
 - `static/index_stream.html` — main chart page
-- `static/app_stream.js` — chart frontend, drawing logic, time formatting, and UI behavior
+- `static/app_stream.js` — chart frontend, drawing logic, controls, Clean Mode, Line Audit, Candle Compare
 - `docs/ai_trading_playbook.md` — AI review doctrine and trading safety rules
-- `.gitignore` — keeps secrets, virtual environments, and local backup files out of GitHub
+- `tests/` — deterministic tests for candle/FVG/zone logic
+- `.gitignore` — keeps secrets, virtual environments, local exports, and zip files out of GitHub
 
 ## Requirements
 
 Python 3 is required.
 
-Install the core packages:
+Install core packages inside the virtual environment:
 
 ```bash
-python3 -m pip install flask python-dotenv websocket-client requests
+python3 -m pip install flask python-dotenv websocket-client requests openai
 ```
 
-Depending on your local environment, more packages may be needed if new features are added.
+Depending on your local environment, more packages may be required by future features.
 
 ## Environment Variables
 
-Configure Alpaca credentials before starting the server:
+Use a local `.env` file. Never commit real keys.
 
-```bash
-export ALPACA_API_KEY="your-key-here"
-export ALPACA_SECRET_KEY="your-secret-here"
+Required for Alpaca data:
+
+```text
+ALPACA_API_KEY=your_alpaca_key_here
+ALPACA_SECRET_KEY=your_alpaca_secret_here
+ALPACA_STOCK_FEED=sip
 ```
 
-OpenAI review is optional:
+Use `iex` if SIP is not available on the account.
 
-```bash
-export OPENAI_API_KEY="your-key-here"
-export OPENAI_MODEL="model-name-optional"
-export ENABLE_AI_AUTO_REVIEW=false
+Optional OpenAI review:
+
+```text
+OPENAI_API_KEY=your_openai_key_here
+OPENAI_MODEL=gpt-4o-mini
+ENABLE_AI_AUTO_REVIEW=false
 ```
 
-Never commit real API keys or secrets.
+Never paste real keys into chat or commit them to GitHub.
 
 ## Run Locally
 
@@ -98,147 +303,100 @@ From the project folder:
 
 ```bash
 cd "/Users/DayTrade/Documents/my chart"
+
+lsof -ti :8900 | xargs kill -9 2>/dev/null || true
+
+source .venv/bin/activate
+set -a
+source .env
+set +a
+
 python3 server_stream.py
 ```
 
-Then open:
+Leave that terminal open.
+
+Open the chart:
 
 ```text
-http://127.0.0.1:8900/
+http://127.0.0.1:8900/?v=stream43
 ```
 
-Performance dashboard:
+Open the dashboard:
 
 ```text
 http://127.0.0.1:8900/performance
 ```
 
-## Testing Before Market Open
+To stop the server, press `Control + C` in the server terminal.
 
-Run these checks before live testing:
+## Pre-Market Test Routine
+
+Before live testing:
 
 ```bash
-python3 -m compileall .
+cd "/Users/DayTrade/Documents/my chart"
+source .venv/bin/activate
+set -a
+source .env
+set +a
+
 python3 -m py_compile server_stream.py
+python3 -m compileall -q .
 node --check static/app_stream.js
+python3 -m unittest discover -s tests -v
 git diff --check
 ```
 
-Then start the server:
+Start the server, open the chart, and check:
 
-```bash
-python3 server_stream.py
+- AAPL, SPY, QQQ load
+- 1Min, 5Min, 15Min work
+- candles match expected market movement
+- candle badge is `CLEAN` or clearly explains `WARNING`
+- Rebuild Chart Data works
+- PDH/PDL, PMH/PML, HOD/LOD, OPEN 5M levels show
+- FVG boxes and midpoint lines render correctly
+- supply/demand and support/resistance are visible when relevant
+- Line Audit opens
+- Candle Compare opens
+- `/performance` loads
+- AI source is `openai` after requesting a fresh AI review
+
+## Useful API Endpoints
+
+```text
+/api/chart?symbol=AAPL&timeframe=5Min
+/api/debug/candles?symbol=AAPL&timeframe=5Min
+/api/debug/chart-lines?symbol=AAPL&timeframe=5Min
+/api/ai/snapshot?symbol=AAPL&timeframe=5Min
+/api/ai/latest-review?symbol=AAPL
+/api/debug/setup-performance?limit=500
 ```
 
-Check:
+Generic symbol/timeframe support should work with `AAPL`, `SPY`, `QQQ`, and other supported symbols.
 
-- AAPL 1Min, 5Min, 15Min
-- SPY 1Min, 5Min, 15Min
-- symbol switching
-- timeframe switching
-- hover time and bottom-axis time
-- supply/demand zones
-- zone reactions
-- liquidity sweeps
-- AI latest review
-- browser console errors
-- server terminal errors
+## Export / Review Notes
 
-## Chart Layers
+Local review exports and zip files are ignored by Git:
 
-The chart currently includes:
+```text
+exports/
+*.zip
+```
 
-- live candles from Alpaca SIP stream
-- VWAP
-- EMA 9 / EMA 20
-- PMH / PML
-- PDH / PDL / PDC
-- support/resistance scoring
-- supply/demand scoring
-- liquidity sweep zones
-- merged clusters
-- 30-minute reaction zones
-- multi-timeframe context
-
-## Zone Reaction Engine
-
-The Zone Reaction Engine provides read-only context around nearby supply and demand zones.
-
-Reaction labels include:
-
-- `HOLD`
-- `RECLAIM`
-- `REJECTION`
-- `FAILED`
-
-These labels are watch context only. They are not trade signals and cannot create an order.
-
-Strong reactions such as demand reclaims and supply rejections are preserved while later candles continue respecting the defended edge.
-
-## Chart Line Audit
-
-The deterministic Chart Line Audit registers existing plotted indicators, levels, zones, reactions, liquidity sweeps, and confirmation triggers with their source, calculation method, reason, status, confidence, priority, and Clean Mode visibility.
-
-- Open **Line Audit** on the main chart to inspect visible items.
-- Use `/api/debug/chart-lines?symbol=AAPL&timeframe=5Min` for the structured debug payload.
-- The audit never invents levels, creates setups, or changes entry-marker eligibility.
-
-Clean Mode 2.0 uses audit metadata to show only nearby, actionable context. VWAP, EMA9, EMA20, current price, nearby major session levels, active zone reactions, and confirmed setup triggers remain visible. Failed, weak, distant, low-priority, invalid, and duplicate nearby research lines are hidden. Full Mode retains broader deterministic context with weak and failed items visually muted.
-
-## Candle Accuracy And Data Integrity
-
-The Candle Accuracy and Data Integrity Engine preserves raw Alpaca bars for audit while allowing only validated candles to feed the chart and deterministic analysis engines.
-
-- `1Min` candles are structurally and contextually validated before display or calculation use.
-- `5Min` and `15Min` candles are rebuilt from validated real `1Min` bars.
-- Suspicious and rejected candles are excluded from indicators, session levels, zones, setups, risk/reward, AI snapshots, logging, and marker inputs.
-- Incomplete rebuilt buckets are retained only when at least 60% of the real provider minutes in that bucket remain valid. No missing minute is fabricated.
-- Chart responses expose `data_quality_status`, `candle_accuracy_mode`, filter counts, and warnings.
-- Use `/api/debug/candles?symbol=AAPL&timeframe=5Min` to inspect bounded raw, validated, rejected, and cross-timeframe comparison data.
-
-`CLEAN` means no candle correction or filtering was required. `WARNING` means a problem was safely filtered or a candle was rebuilt. `DEGRADED` means too little reliable data remains for normal analysis.
-
-## AI Trade Review
-
-AI Trade Review is a read-only review assistant. It uses structured chart data, market context, risk rules, and the trading playbook to explain possible setups.
-
-It can discuss:
-
-- trend
-- momentum
-- candles
-- wicks
-- liquidity sweeps
-- traps
-- support and resistance
-- supply and demand
-- SPY/QQQ confirmation
-- options contract quality
-- risk/reward
-- no-trade conditions
-
-The chart may display a possible-entry marker only when strict backend gates pass, including confirmed setup grade, acceptable risk/reward, market confirmation, non-chop regime, and valid entry/invalidation levels.
-
-AI Trade Review cannot place trades, send broker orders, connect to Webull, or override backend safety gates.
-
-## Trading Playbook
-
-`docs/ai_trading_playbook.md` defines the AI assistant's trading doctrine, options-risk knowledge, setup standards, marker rules, decision language, and safety boundaries.
-
-The playbook guides interpretation only. Backend chart logic, structured snapshot data, and hard gates remain the source of truth.
-
-Every review follows this safety doctrine:
-
-> Read-only review. Not financial advice. Not an order. Confirm manually. Do not chase.
+Use exports for end-of-day review, but do not commit them.
 
 ## Current Limitations
 
-- Live trade aggregation can only be fully tested during an active market session.
+- This is a local development Flask server, not a production deployment.
+- Live behavior must be tested during active market sessions.
 - Exchange-holiday logic is not fully implemented and should be verified manually.
+- Candle validation can protect against obvious bad prints, but raw market data should still be cross-checked when something looks wrong.
+- FVGs, zones, support/resistance, and AI review are context only, not trade commands.
 - No order execution is implemented.
 - No Webull connection is implemented.
-- No automated test suite or dependency manifest is currently included.
-- Some macOS Python environments may show a LibreSSL / urllib3 warning even when HTTPS requests still work.
+- macOS Python may show a LibreSSL / urllib3 warning even when requests still work.
 
 ## Important Note
 
