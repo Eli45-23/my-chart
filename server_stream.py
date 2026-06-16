@@ -784,6 +784,65 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
                     break
         return list(dict.fromkeys(labels))
 
+    def candle_body(candle):
+        if candle.get("open") is None or candle.get("close") is None:
+            return 0
+        return abs(candle["close"] - candle["open"])
+
+    def candle_body_bounds(candle):
+        if candle.get("open") is None or candle.get("close") is None:
+            return None, None
+        return min(candle["open"], candle["close"]), max(candle["open"], candle["close"])
+
+    def displacement_metrics(candle1, candle2, direction):
+        c1_body = candle_body(candle1)
+        c2_body = candle_body(candle2)
+        c2_range = max(0.0001, candle2.get("high", 0) - candle2.get("low", 0))
+        middle_body_percent = c2_body / c2_range * 100
+        c1_body_low, c1_body_high = candle_body_bounds(candle1)
+        c2_body_low, c2_body_high = candle_body_bounds(candle2)
+        c2_close = candle2.get("close")
+        c2_open = candle2.get("open")
+        if direction == "bullish":
+            direction_ok = c2_close is not None and c2_open is not None and c2_close > c2_open
+            closed_beyond = c2_close is not None and candle1.get("high") is not None and c2_close > candle1["high"]
+            full_body_engulf = (
+                c1_body_low is not None and c2_body_low is not None
+                and c2_body_low <= c1_body_low and c2_body_high >= c1_body_high
+            )
+        else:
+            direction_ok = c2_close is not None and c2_open is not None and c2_close < c2_open
+            closed_beyond = c2_close is not None and candle1.get("low") is not None and c2_close < candle1["low"]
+            full_body_engulf = (
+                c1_body_low is not None and c2_body_low is not None
+                and c2_body_low <= c1_body_low and c2_body_high >= c1_body_high
+            )
+        body_overpowers = c2_body > max(0.0001, c1_body)
+        body_ratio = c2_body / max(0.0001, c1_body)
+        middle_engulfed = bool(closed_beyond and (full_body_engulf or body_ratio >= 1.25))
+        range_vs_atr = c2_range / max(0.01, atr14 or 0.01)
+        displacement_score = int(max(0, min(100,
+            (20 if direction_ok else 0)
+            + min(20, body_ratio / 1.25 * 20)
+            + (25 if closed_beyond else 0)
+            + min(20, middle_body_percent / 65 * 20)
+            + min(15, range_vs_atr * 15)
+        )))
+        engulfing_score = 100 if full_body_engulf and closed_beyond else 75 if middle_engulfed else 40 if body_overpowers else 0
+        is_chop_context = middle_body_percent < 35 or range_vs_atr < 0.45 or not closed_beyond
+        return {
+            "candle1_body": c1_body,
+            "candle2_body": c2_body,
+            "displacement_score": displacement_score,
+            "engulfing_score": int(engulfing_score),
+            "middle_candle_body_percent": round(middle_body_percent, 1),
+            "middle_candle_engulfed_c1": middle_engulfed,
+            "middle_candle_closed_beyond_c1": bool(closed_beyond),
+            "middle_candle_direction_ok": bool(direction_ok),
+            "middle_candle_body_overpowered_c1": bool(body_overpowers),
+            "is_chop_context": bool(is_chop_context),
+        }
+
     gaps = []
     for index in range(2, len(candles)):
         candle1 = candles[index - 2]
@@ -851,6 +910,7 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
         age = len(candles) - index - 1
         midpoint = (top + bottom) / 2
         gap_vs_atr = height / max(0.01, atr14 or 0.01)
+        metrics = displacement_metrics(candle1, candle2, direction)
         impulse_range = candle2.get("high", 0) - candle2.get("low", 0)
         impulse_score = min(100, int((impulse_range / max(0.01, atr14 or 0.01)) * 35))
         freshness_score = max(10, 100 - age * 4)
@@ -859,11 +919,13 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
         confluence_labels = confluence(midpoint, bottom, top)
         confluence_score = min(100, len(confluence_labels) * 28)
         quality_score = int(
-            freshness_score * 0.25
-            + fill_score * 0.25
-            + impulse_score * 0.20
+            freshness_score * 0.12
+            + fill_score * 0.18
+            + metrics["displacement_score"] * 0.25
+            + metrics["engulfing_score"] * 0.12
             + size_score * 0.15
-            + confluence_score * 0.15
+            + confluence_score * 0.13
+            + impulse_score * 0.05
         )
         if status == "FILLED":
             quality_score -= 35
@@ -871,6 +933,16 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             quality_score -= 10
         if gap_vs_atr < 0.08:
             quality_score = min(quality_score, 49)
+        if not metrics["middle_candle_closed_beyond_c1"]:
+            quality_score = min(quality_score, 49)
+        if not metrics["middle_candle_body_overpowered_c1"]:
+            quality_score = min(quality_score, 49)
+        if metrics["displacement_score"] < 55:
+            quality_score = min(quality_score, 49)
+        elif metrics["displacement_score"] < 70 or not metrics["middle_candle_engulfed_c1"]:
+            quality_score = min(quality_score, 64)
+        if metrics["is_chop_context"]:
+            quality_score -= 12
         quality_score = max(0, min(100, quality_score))
         grade = fvg_quality_grade(quality_score)
         warnings = []
@@ -880,8 +952,40 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             warnings.append("FVG has multiple touches.")
         if gap_vs_atr < 0.08:
             warnings.append("Tiny FVG relative to ATR; hidden in Clean Mode.")
+        if not metrics["middle_candle_closed_beyond_c1"]:
+            warnings.append("Middle candle did not close beyond candle 1.")
+        if not metrics["middle_candle_body_overpowered_c1"]:
+            warnings.append("Middle candle body did not overpower candle 1.")
+        if metrics["displacement_score"] < 55:
+            warnings.append("Weak middle-candle displacement.")
+        if metrics["is_chop_context"]:
+            warnings.append("FVG formed in chop-like candle context.")
         if grade == "WEAK":
             warnings.append("Weak FVG quality.")
+        hidden_reasons = []
+        if status == "FILLED":
+            hidden_reasons.append("filled FVG")
+        if status == "INVALID":
+            hidden_reasons.append("invalid FVG")
+        if grade == "WEAK":
+            hidden_reasons.append("weak FVG quality")
+        if grade == "C":
+            hidden_reasons.append("C-grade FVG hidden in Clean Mode")
+        if gap_vs_atr < 0.08:
+            hidden_reasons.append("tiny gap")
+        if metrics["displacement_score"] < 70 or not metrics["middle_candle_engulfed_c1"]:
+            hidden_reasons.append("insufficient displacement/engulfing")
+        if metrics["is_chop_context"]:
+            hidden_reasons.append("chop context")
+        visible_in_clean_mode = (
+            status in {"ACTIVE", "PARTIALLY_FILLED"}
+            and grade in {"A", "B"}
+            and metrics["displacement_score"] >= 70
+            and metrics["middle_candle_closed_beyond_c1"]
+            and metrics["middle_candle_body_overpowered_c1"]
+            and not metrics["is_chop_context"]
+            and not hidden_reasons
+        )
 
         gaps.append({
             "id": f"{symbol}-{timeframe}-{gap_type}-{created_at}-{round_price(bottom)}-{round_price(top)}",
@@ -892,13 +996,22 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             "candle1_time": candle1_time,
             "candle2_time": candle2_time,
             "candle3_time": candle3_time,
+            "candle1_open": round_price(candle1.get("open")),
             "candle1_high": round_price(c1_high),
             "candle1_low": round_price(c1_low),
+            "candle1_close": round_price(candle1.get("close")),
+            "candle2_open": round_price(candle2.get("open")),
+            "candle2_high": round_price(candle2.get("high")),
+            "candle2_low": round_price(candle2.get("low")),
+            "candle2_close": round_price(candle2.get("close")),
+            "candle3_open": round_price(candle3.get("open")),
             "candle3_high": round_price(c3_high),
             "candle3_low": round_price(c3_low),
+            "candle3_close": round_price(candle3.get("close")),
             "top": round_price(top),
             "bottom": round_price(bottom),
             "midpoint": round_price(midpoint),
+            "gap_size": round_price(height),
             "created_at": created_at,
             "last_touch_time": last_touch_time,
             "touch_count": touch_count,
@@ -911,9 +1024,17 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             "impulse_score": impulse_score,
             "freshness_score": freshness_score,
             "size_score": size_score,
-            "worth_showing": status in {"ACTIVE", "PARTIALLY_FILLED"} and grade in {"A", "B", "C"},
+            "displacement_score": metrics["displacement_score"],
+            "engulfing_score": metrics["engulfing_score"],
+            "middle_candle_body_percent": metrics["middle_candle_body_percent"],
+            "middle_candle_engulfed_c1": metrics["middle_candle_engulfed_c1"],
+            "middle_candle_closed_beyond_c1": metrics["middle_candle_closed_beyond_c1"],
+            "is_chop_context": metrics["is_chop_context"],
+            "worth_showing": visible_in_clean_mode,
+            "visible_in_clean_mode": visible_in_clean_mode,
+            "hidden_reason": "; ".join(dict.fromkeys(hidden_reasons)) if hidden_reasons else None,
             "source": "fvg_engine",
-            "reason": "strict_3_candle_imbalance",
+            "reason": "strict_3_candle_imbalance_with_displacement",
             "rule_passed": True,
             "bullish_rule_passed": bool(bullish_rule_passed),
             "bearish_rule_passed": bool(bearish_rule_passed),
@@ -926,6 +1047,30 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
         -gap["quality_score"],
         -(gap.get("created_at") or 0),
     ))
+    clean_representatives = []
+    for gap in gaps:
+        if not gap.get("visible_in_clean_mode"):
+            continue
+        duplicate = any(
+            other.get("direction") == gap.get("direction") and (
+                ranges_overlap(gap.get("bottom"), gap.get("top"), other.get("bottom"), other.get("top"))
+                or abs((gap.get("midpoint") or 0) - (other.get("midpoint") or 0)) <=
+                max(
+                    tolerance,
+                    abs((gap.get("top") or 0) - (gap.get("bottom") or 0)),
+                    abs((other.get("top") or 0) - (other.get("bottom") or 0)),
+                ) * 1.75
+            )
+            for other in clean_representatives
+        )
+        if duplicate:
+            gap["visible_in_clean_mode"] = False
+            gap["worth_showing"] = False
+            reason = "duplicate lower-priority FVG"
+            gap["hidden_reason"] = f"{gap.get('hidden_reason')}; {reason}" if gap.get("hidden_reason") else reason
+            gap["warnings"].append("Duplicate lower-priority FVG hidden in Clean Mode.")
+        else:
+            clean_representatives.append(gap)
     bullish = [gap for gap in gaps if gap["type"] == "BULLISH_FVG"][:8]
     bearish = [gap for gap in gaps if gap["type"] == "BEARISH_FVG"][:8]
     return {
@@ -5296,22 +5441,39 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
             strength=grade,
             status=status,
             priority=1 if active and grade in {"A", "B"} else 2 if active and grade == "C" else 3,
-            clean=active and grade in {"A", "B", "C"} and bool(gap.get("worth_showing")),
+            clean=bool(gap.get("visible_in_clean_mode")),
             item_warnings=gap.get("warnings") or [],
             extra_details={
                 "direction": gap.get("direction"),
                 "candle1_time": gap.get("candle1_time"),
                 "candle2_time": gap.get("candle2_time"),
                 "candle3_time": gap.get("candle3_time"),
+                "candle1_open": gap.get("candle1_open"),
                 "candle1_high": gap.get("candle1_high"),
                 "candle1_low": gap.get("candle1_low"),
+                "candle1_close": gap.get("candle1_close"),
+                "candle2_open": gap.get("candle2_open"),
+                "candle2_high": gap.get("candle2_high"),
+                "candle2_low": gap.get("candle2_low"),
+                "candle2_close": gap.get("candle2_close"),
+                "candle3_open": gap.get("candle3_open"),
                 "candle3_high": gap.get("candle3_high"),
                 "candle3_low": gap.get("candle3_low"),
+                "candle3_close": gap.get("candle3_close"),
                 "rule_passed": gap.get("rule_passed"),
                 "top": gap.get("top"),
                 "bottom": gap.get("bottom"),
                 "midpoint": gap.get("midpoint"),
+                "gap_size": gap.get("gap_size"),
                 "fill_percentage": gap.get("fill_percentage"),
+                "displacement_score": gap.get("displacement_score"),
+                "engulfing_score": gap.get("engulfing_score"),
+                "middle_candle_body_percent": gap.get("middle_candle_body_percent"),
+                "middle_candle_engulfed_c1": gap.get("middle_candle_engulfed_c1"),
+                "middle_candle_closed_beyond_c1": gap.get("middle_candle_closed_beyond_c1"),
+                "is_chop_context": gap.get("is_chop_context"),
+                "visible_in_clean_mode": gap.get("visible_in_clean_mode"),
+                "hidden_reason": gap.get("hidden_reason"),
                 "source": gap.get("source"),
                 "reason": gap.get("reason"),
             },
@@ -5637,6 +5799,7 @@ def compact_intraday_ai_context(payload):
     support_resistance = payload.get("support_resistance") or {}
     supply_demand = payload.get("supply_demand") or {}
     fair_value_gaps = payload.get("fair_value_gaps") or {}
+    all_fvgs = (fair_value_gaps.get("bullish") or []) + (fair_value_gaps.get("bearish") or [])
     chart_lines = payload.get("chart_lines") or []
     zone_reactions = [
         {
@@ -5703,11 +5866,25 @@ def compact_intraday_ai_context(payload):
                 "quality_grade": gap.get("quality_grade"),
                 "quality_score": gap.get("quality_score"),
                 "fill_percentage": gap.get("fill_percentage"),
+                "displacement_score": gap.get("displacement_score"),
+                "engulfing_score": gap.get("engulfing_score"),
+                "middle_candle_engulfed_c1": gap.get("middle_candle_engulfed_c1"),
+                "middle_candle_closed_beyond_c1": gap.get("middle_candle_closed_beyond_c1"),
                 "read_only": True,
             }
-            for gap in (fair_value_gaps.get("bullish") or [])[:3] + (fair_value_gaps.get("bearish") or [])[:3]
-            if gap.get("status") in {"ACTIVE", "PARTIALLY_FILLED"}
+            for gap in all_fvgs
+            if gap.get("status") in {"ACTIVE", "PARTIALLY_FILLED"} and gap.get("quality_grade") in {"A", "B"} and gap.get("visible_in_clean_mode")
         ],
+        "fair_value_gap_counts": {
+            "active_meaningful": len([
+                gap for gap in all_fvgs
+                if gap.get("status") in {"ACTIVE", "PARTIALLY_FILLED"} and gap.get("quality_grade") in {"A", "B"} and gap.get("visible_in_clean_mode")
+            ]),
+            "weak_or_filled_audit_only": len([
+                gap for gap in all_fvgs
+                if gap.get("quality_grade") == "WEAK" or gap.get("status") in {"FILLED", "INVALID"} or not gap.get("visible_in_clean_mode")
+            ]),
+        },
         "chart_line_audit": [
             {
                 "type": line.get("type"),

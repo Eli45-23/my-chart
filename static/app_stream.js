@@ -617,6 +617,7 @@ function addReactionZone(label, zone, color) {
 
 function shouldRenderFvg(gap) {
   if (!gap) return false;
+  if (cleanMode && !gap.visible_in_clean_mode) return false;
   if (cleanMode && !(gap.worth_showing && ["ACTIVE", "PARTIALLY_FILLED"].includes(gap.status))) return false;
   if (cleanMode && gap.quality_grade === "WEAK") return false;
   const currentPrice = latestPayload?.current_price || latestPayload?.latest_trade?.price || latestPayload?.candles?.slice(-1)?.[0]?.close;
@@ -711,8 +712,12 @@ function fvgAuditProofHtml(line) {
     Direction: ${escapeHtml(details.direction || "n/a")}<br>
     Rule passed: ${details.rule_passed === true ? "true" : "false"}<br>
     C1 high/low: ${escapeHtml(details.candle1_high ?? "n/a")} / ${escapeHtml(details.candle1_low ?? "n/a")}<br>
+    C2 open/high/low/close: ${escapeHtml(details.candle2_open ?? "n/a")} / ${escapeHtml(details.candle2_high ?? "n/a")} / ${escapeHtml(details.candle2_low ?? "n/a")} / ${escapeHtml(details.candle2_close ?? "n/a")}<br>
     C3 high/low: ${escapeHtml(details.candle3_high ?? "n/a")} / ${escapeHtml(details.candle3_low ?? "n/a")}<br>
     Top / bottom / midpoint: ${escapeHtml(details.top ?? line.top ?? "n/a")} / ${escapeHtml(details.bottom ?? line.bottom ?? "n/a")} / ${escapeHtml(details.midpoint ?? line.price ?? "n/a")}<br>
+    Displacement / engulfing: ${escapeHtml(details.displacement_score ?? "n/a")} / ${escapeHtml(details.engulfing_score ?? "n/a")}<br>
+    C2 engulfed C1: ${details.middle_candle_engulfed_c1 === true ? "true" : "false"} · Closed beyond C1: ${details.middle_candle_closed_beyond_c1 === true ? "true" : "false"}<br>
+    Visible in Clean Mode: ${details.visible_in_clean_mode === true ? "true" : "false"}${details.hidden_reason ? ` · Hidden reason: ${escapeHtml(details.hidden_reason)}` : ""}<br>
     Fill: ${escapeHtml(details.fill_percentage ?? "n/a")}% · Status: ${escapeHtml(line.status)}<br>
   `;
 }

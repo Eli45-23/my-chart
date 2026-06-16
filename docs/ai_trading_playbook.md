@@ -197,6 +197,18 @@ Demand holds/reclaims and supply holds/rejections are early reversal-watch conte
 - A failed zone is invalidated context and should not be trusted as support or resistance.
 - Zone reactions must never create PLAN_READY or an entry marker by themselves.
 
+## Fair Value Gap Context
+
+A fair value gap (`FVG`) is a strict three-candle imbalance, not a demand/base zone and not the whole impulse candle. The deterministic backend decides whether an FVG exists; the AI must never invent or override FVG detection.
+
+- Bullish FVG: candle 1 high is below candle 3 low (`c1.high < c3.low`). The FVG box is only the gap from `c1.high` to `c3.low`.
+- Bearish FVG: candle 1 low is above candle 3 high (`c1.low > c3.high`). The FVG box is only the gap from `c3.high` to `c1.low`.
+- The midpoint is the center of that gap only.
+- The middle candle should be a strong displacement candle. Bullish FVG quality improves when candle 2 is bullish, closes above candle 1 high, and its body overpowers or engulfs candle 1. Bearish FVG quality improves when candle 2 is bearish, closes below candle 1 low, and its body overpowers or engulfs candle 1.
+- Weak, tiny, filled, duplicate, or chop-context FVGs should not be treated as meaningful trading context.
+- FVG is context, not an entry by itself. It still requires price-action confirmation, key-level context, supply/demand or support/resistance agreement, market confirmation, risk/reward, and backend gates.
+- Do not confuse FVG with supply/demand. Demand/supply describes a base or reaction area; FVG describes a three-candle imbalance between candle 1 and candle 3.
+
 ## Chart Line Audit Context
 
 The chart-line audit is deterministic, read-only context that explains where plotted indicators, levels, zones, reactions, sweeps, and confirmation triggers came from. Use its source, reason, status, confidence, and priority fields to explain which levels matter and which are muted or failed. It must never create a setup, override backend gates, or be treated as a standalone entry signal.

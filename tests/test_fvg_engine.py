@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import server_stream
@@ -20,6 +20,17 @@ def candle(time, open_price, high, low, close, volume=1000):
         "low": low,
         "close": close,
         "volume": volume,
+    }
+
+
+def alpaca_bar(timestamp, open_price, high, low, close, volume=1000):
+    return {
+        "t": timestamp.isoformat().replace("+00:00", "Z"),
+        "o": open_price,
+        "h": high,
+        "l": low,
+        "c": close,
+        "v": volume,
     }
 
 
@@ -47,7 +58,9 @@ class FvgEngineTests(unittest.TestCase):
         self.assertEqual(gap["candle3_low"], 100.8)
         self.assertTrue(gap["rule_passed"])
         self.assertEqual(gap["source"], "fvg_engine")
-        self.assertEqual(gap["reason"], "strict_3_candle_imbalance")
+        self.assertEqual(gap["reason"], "strict_3_candle_imbalance_with_displacement")
+        self.assertGreaterEqual(gap["displacement_score"], 70)
+        self.assertTrue(gap["middle_candle_closed_beyond_c1"])
         self.assertEqual(gap["status"], "PARTIALLY_FILLED")
         self.assertGreater(gap["fill_percentage"], 0)
         self.assertTrue(gap["read_only"])
@@ -71,8 +84,76 @@ class FvgEngineTests(unittest.TestCase):
         self.assertEqual(gap["candle1_low"], 100.8)
         self.assertEqual(gap["candle3_high"], 100.1)
         self.assertTrue(gap["rule_passed"])
+        self.assertGreaterEqual(gap["displacement_score"], 70)
+        self.assertTrue(gap["middle_candle_closed_beyond_c1"])
         self.assertEqual(gap["status"], "FILLED")
         self.assertIn("FVG is filled", " ".join(gap["warnings"]))
+
+    def test_bullish_fvg_without_middle_displacement_is_weak_and_hidden(self):
+        candles = [
+            candle(1, 100.0, 100.2, 99.8, 100.1),
+            candle(2, 100.25, 100.7, 100.15, 100.3),
+            candle(3, 100.9, 101.1, 100.8, 101.0),
+        ]
+
+        gaps = server_stream.detect_fair_value_gaps(candles, symbol="AAPL", timeframe="1Min", atr14=1.0)
+        gap = gaps["bullish"][0]
+
+        self.assertEqual(gap["quality_grade"], "WEAK")
+        self.assertFalse(gap["visible_in_clean_mode"])
+        self.assertFalse(gap["worth_showing"])
+        self.assertIn("insufficient displacement", gap["hidden_reason"])
+
+    def test_bearish_fvg_without_middle_displacement_is_weak_and_hidden(self):
+        candles = [
+            candle(1, 101.0, 101.3, 100.8, 101.2),
+            candle(2, 100.75, 100.9, 100.2, 100.7),
+            candle(3, 99.8, 100.1, 99.4, 99.6),
+        ]
+
+        gaps = server_stream.detect_fair_value_gaps(candles, symbol="AAPL", timeframe="1Min", atr14=1.0)
+        gap = gaps["bearish"][0]
+
+        self.assertEqual(gap["quality_grade"], "WEAK")
+        self.assertFalse(gap["visible_in_clean_mode"])
+        self.assertFalse(gap["worth_showing"])
+        self.assertIn("insufficient displacement", gap["hidden_reason"])
+
+    def test_strong_bullish_displacement_becomes_clean_mode_candidate(self):
+        candles = [
+            candle(1, 100.0, 100.2, 99.8, 100.05),
+            candle(2, 99.95, 101.7, 99.9, 101.45, 2500),
+            candle(3, 101.1, 101.8, 100.85, 101.5, 2200),
+        ]
+
+        gaps = server_stream.detect_fair_value_gaps(
+            candles, symbol="AAPL", timeframe="5Min", atr14=3.0,
+            levels={"hod": 100.9},
+        )
+        gap = gaps["bullish"][0]
+
+        self.assertIn(gap["quality_grade"], {"A", "B"})
+        self.assertTrue(gap["middle_candle_closed_beyond_c1"])
+        self.assertTrue(gap["middle_candle_engulfed_c1"])
+        self.assertTrue(gap["visible_in_clean_mode"])
+
+    def test_strong_bearish_displacement_becomes_clean_mode_candidate(self):
+        candles = [
+            candle(1, 101.0, 101.3, 100.8, 101.2),
+            candle(2, 101.25, 101.35, 99.4, 99.65, 2500),
+            candle(3, 99.8, 100.1, 99.2, 99.4, 2200),
+        ]
+
+        gaps = server_stream.detect_fair_value_gaps(
+            candles, symbol="AAPL", timeframe="5Min", atr14=1.0,
+            levels={"lod": 100.1},
+        )
+        gap = gaps["bearish"][0]
+
+        self.assertIn(gap["quality_grade"], {"A", "B"})
+        self.assertTrue(gap["middle_candle_closed_beyond_c1"])
+        self.assertTrue(gap["middle_candle_engulfed_c1"])
+        self.assertTrue(gap["visible_in_clean_mode"])
 
     def test_no_bullish_fvg_when_candle_one_high_overlaps_candle_three_low(self):
         candles = [
@@ -123,9 +204,49 @@ class FvgEngineTests(unittest.TestCase):
         self.assertEqual(fvg_line["top"], 100.8)
         self.assertEqual(fvg_line["bottom"], 100.2)
         self.assertEqual(fvg_line["source"], "fvg_engine")
-        self.assertEqual(fvg_line["reason"], "strict_3_candle_imbalance")
+        self.assertEqual(fvg_line["reason"], "strict_3_candle_imbalance_with_displacement")
         self.assertTrue(fvg_line["extra_details"]["rule_passed"])
         self.assertEqual(fvg_line["extra_details"]["midpoint"], 100.5)
+        self.assertGreaterEqual(fvg_line["extra_details"]["displacement_score"], 70)
+        self.assertTrue(fvg_line["extra_details"]["middle_candle_closed_beyond_c1"])
+
+    def test_duplicate_overlapping_fvgs_suppress_lower_priority_clean_display(self):
+        candles = [
+            candle(1, 100.0, 100.2, 99.8, 100.05),
+            candle(2, 99.95, 100.7, 99.9, 100.6, 2500),
+            candle(3, 100.5, 101.6, 100.5, 101.5, 2200),
+            candle(4, 101.2, 101.7, 100.9, 101.5, 1800),
+            candle(5, 101.5, 101.9, 101.2, 101.7, 1700),
+        ]
+
+        gaps = server_stream.detect_fair_value_gaps(
+            candles, symbol="AAPL", timeframe="5Min", atr14=1.5,
+            levels={"hod": 100.9},
+        )
+        clean_gaps = [gap for gap in gaps["bullish"] if gap["visible_in_clean_mode"]]
+        hidden_duplicates = [gap for gap in gaps["bullish"] if gap.get("hidden_reason") and "duplicate" in gap["hidden_reason"]]
+
+        self.assertEqual(len(clean_gaps), 1)
+        self.assertGreaterEqual(len(hidden_duplicates), 1)
+
+    def test_bad_aapl_print_cannot_create_validated_fvg(self):
+        start = datetime(2026, 6, 12, 11, 45, tzinfo=timezone.utc)
+        bars = []
+        price = 292.85
+        for index in range(20):
+            timestamp = start + timedelta(minutes=index)
+            close = price + (0.01 if index % 2 == 0 else -0.005)
+            bars.append(alpaca_bar(timestamp, price, price + 0.04, price - 0.04, close, 1200))
+            price = close
+        bad_time = datetime(2026, 6, 12, 12, 4, tzinfo=timezone.utc)
+        bars.append(alpaca_bar(bad_time, 292.9067, 293.0, 290.403, 290.403, 824))
+        bars.append(alpaca_bar(bad_time + timedelta(minutes=1), 292.82, 292.9, 292.78, 292.84, 1300))
+        bars.sort(key=lambda item: item["t"])
+        bundle = server_stream.build_candle_integrity_bundle(bars, "AAPL", "1Min", bars)
+        gaps = server_stream.detect_fair_value_gaps(bundle["validated_candles"], symbol="AAPL", timeframe="1Min", atr14=1.0)
+
+        self.assertTrue(any(item["raw_values"]["low"] == 290.403 for item in bundle["rejected_candles"]))
+        self.assertTrue(all(gap["bottom"] != 290.403 and gap["top"] != 290.403 for gap in gaps["all"]))
 
     def test_clean_mode_hides_weak_and_filled_fvgs_in_audit_metadata(self):
         snapshot = {
