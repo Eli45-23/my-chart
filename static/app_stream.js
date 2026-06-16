@@ -7,6 +7,7 @@ const streamStatusEl = document.getElementById("streamStatus");
 const dataQualityStatusEl = document.getElementById("dataQualityStatus");
 const chartEmptyEl = document.getElementById("chartEmpty");
 const fvgOverlay = document.getElementById("fvgOverlay");
+const paperTradeOverlay = document.getElementById("paperTradeOverlay");
 const keyLevelEdgeMarkers = document.getElementById("keyLevelEdgeMarkers");
 const tfButtons = document.querySelectorAll(".tf-btn");
 const toggleButtons = document.querySelectorAll(".toggle-btn[data-layer]");
@@ -14,6 +15,7 @@ const cleanModeToggle = document.getElementById("cleanModeToggle");
 const symbolInput = document.getElementById("symbolInput");
 const loadSymbolButton = document.getElementById("loadSymbolButton");
 const rebuildChartButton = document.getElementById("rebuildChartButton");
+const paperTradeToggle = document.getElementById("paperTradeToggle");
 const rebuildBanner = document.getElementById("rebuildBanner");
 const chartTitleEl = document.getElementById("chartTitle");
 const chartSubtitleEl = document.getElementById("chartSubtitle");
@@ -29,8 +31,26 @@ const candleCompareClose = document.getElementById("candleCompareClose");
 const candleCompareMeta = document.getElementById("candleCompareMeta");
 const candleCompareSummary = document.getElementById("candleCompareSummary");
 const candleCompareList = document.getElementById("candleCompareList");
+const paperTradePanel = document.getElementById("paperTradePanel");
+const paperTradeClose = document.getElementById("paperTradeClose");
+const paperTradeMeta = document.getElementById("paperTradeMeta");
+const paperTradeForm = document.getElementById("paperTradeForm");
+const paperSymbolInput = document.getElementById("paperSymbol");
+const paperTimeframeInput = document.getElementById("paperTimeframe");
+const paperTradeTypeInput = document.getElementById("paperTradeType");
+const paperEntryInput = document.getElementById("paperEntry");
+const paperStopInput = document.getElementById("paperStop");
+const paperTargetInput = document.getElementById("paperTarget");
+const paperQuantityInput = document.getElementById("paperQuantity");
+const paperNotesInput = document.getElementById("paperNotes");
+const paperCloseTradeButton = document.getElementById("paperCloseTrade");
+const paperClearTradeButton = document.getElementById("paperClearTrade");
+const paperTradeMessage = document.getElementById("paperTradeMessage");
+const paperTradeSummary = document.getElementById("paperTradeSummary");
+const paperTradeList = document.getElementById("paperTradeList");
 
 const CLEAN_MODE_STORAGE_KEY = "aaplChartCleanMode";
+const PAPER_TRADE_STORAGE_KEY = "paperTradePlannerTrades";
 let cleanMode = true;
 
 try {
@@ -83,6 +103,9 @@ const COLORS = {
   confirmationInvalid: "#727d8b",
   aiEntryBullish: "#62ad91",
   aiEntryBearish: "#cf7373",
+  paperEntry: "#d8c27a",
+  paperStop: "#d77979",
+  paperTarget: "#65b9a6",
   bullFvg: "#5da68f",
   bearFvg: "#c87575",
   weakFvg: "#5f6875",
@@ -97,6 +120,8 @@ let didInitialLoad = false;
 let latestPayload = null;
 let aiEntryPriceLine = null;
 let labeledPrices = [];
+let paperTrades = [];
+let paperTradePriceLines = [];
 
 const CORE_CLEAN_KEY_LEVEL_TYPES = new Set([
   "PMH", "PML", "PDH", "PDL", "HOD", "LOD", "OPEN 5M HIGH", "OPEN 5M LOW",
@@ -275,6 +300,252 @@ function isCoreCleanKeyLevel(line) {
 function currentChartPrice(data = latestPayload) {
   const latestCandle = data?.candles?.slice(-1)?.[0];
   return data?.current_price || data?.latest_trade?.price || latestCandle?.close || null;
+}
+
+function loadPaperTrades() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(PAPER_TRADE_STORAGE_KEY) || "[]");
+    paperTrades = Array.isArray(parsed) ? parsed.filter(trade => trade?.read_only === true) : [];
+  } catch (_) {
+    paperTrades = [];
+  }
+}
+
+function savePaperTrades() {
+  try {
+    localStorage.setItem(PAPER_TRADE_STORAGE_KEY, JSON.stringify(paperTrades.slice(-80)));
+  } catch (_) {
+    setPaperTradeMessage("Unable to save paper trades in this browser session.", "warning");
+  }
+}
+
+function paperTradeScopeMatches(trade, symbol = activeSymbol, timeframe = activeTimeframe) {
+  return trade?.symbol === symbol && trade?.timeframe === timeframe;
+}
+
+function activePaperTrade(symbol = activeSymbol, timeframe = activeTimeframe) {
+  return paperTrades
+    .filter(trade => paperTradeScopeMatches(trade, symbol, timeframe) && trade.status === "ACTIVE")
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
+}
+
+function isOptionPaperTrade(type) {
+  return type === "CALL_OPTION" || type === "PUT_OPTION";
+}
+
+function paperTradeDirection(type) {
+  return type === "SHORT_STOCK" || type === "PUT_OPTION" ? "short" : "long";
+}
+
+function paperTradeTypeLabel(type) {
+  return ({
+    LONG_STOCK: "Long Stock",
+    SHORT_STOCK: "Short Stock",
+    CALL_OPTION: "Call Option",
+    PUT_OPTION: "Put Option",
+  })[type] || "Paper Trade";
+}
+
+function paperStatusLabel(status) {
+  return String(status || "ACTIVE").replace(/_/g, " ");
+}
+
+function paperNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function paperMoney(value) {
+  return Number.isFinite(Number(value)) ? `$${Number(value).toFixed(2)}` : "n/a";
+}
+
+function calculatePaperTrade(trade) {
+  const entry = paperNumber(trade?.entry);
+  const stop = paperNumber(trade?.stop);
+  const target = paperNumber(trade?.target);
+  const quantity = Math.max(1, Math.floor(paperNumber(trade?.quantity) || 1));
+  const multiplier = isOptionPaperTrade(trade?.type) ? 100 : 1;
+  const riskPerUnit = Math.abs(entry - stop) * multiplier;
+  const rewardPerUnit = Math.abs(target - entry) * multiplier;
+  const totalRisk = riskPerUnit * quantity;
+  const totalReward = rewardPerUnit * quantity;
+  const rr = riskPerUnit > 0 ? rewardPerUnit / riskPerUnit : null;
+  return { entry, stop, target, quantity, multiplier, riskPerUnit, rewardPerUnit, totalRisk, totalReward, rr };
+}
+
+function setPaperTradeMessage(message = "", tone = "") {
+  if (!paperTradeMessage) return;
+  paperTradeMessage.textContent = message;
+  paperTradeMessage.className = `paper-message ${tone}`.trim();
+}
+
+function setPaperTradeFormDefaults() {
+  if (!paperSymbolInput || !paperTimeframeInput) return;
+  paperSymbolInput.value = activeSymbol;
+  paperTimeframeInput.value = activeTimeframe;
+  paperTradeMeta.textContent = `${activeSymbol} · ${activeTimeframe} · browser-local only`;
+  if (!paperQuantityInput.value) paperQuantityInput.value = "1";
+}
+
+function resetPaperTradeForm(keepSymbol = true) {
+  if (!paperTradeForm) return;
+  paperTradeForm.reset();
+  paperTradeTypeInput.value = "LONG_STOCK";
+  paperQuantityInput.value = "1";
+  if (keepSymbol) setPaperTradeFormDefaults();
+  setPaperTradeMessage("");
+}
+
+function readPaperTradeForm() {
+  const symbol = normalizeSymbolInput(paperSymbolInput.value) || activeSymbol;
+  const trade = {
+    id: `paper-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    symbol,
+    timeframe: activeTimeframe,
+    type: paperTradeTypeInput.value,
+    entry: paperNumber(paperEntryInput.value),
+    stop: paperNumber(paperStopInput.value),
+    target: paperNumber(paperTargetInput.value),
+    quantity: Math.max(1, Math.floor(paperNumber(paperQuantityInput.value) || 0)),
+    notes: String(paperNotesInput.value || "").trim(),
+    status: "ACTIVE",
+    created_at: new Date().toISOString(),
+    closed_at: null,
+    close_reason: null,
+    read_only: true,
+    safety: "Paper trade only — no real order.",
+  };
+  const calc = calculatePaperTrade(trade);
+  if (![trade.entry, trade.stop, trade.target].every(Number.isFinite)) {
+    throw new Error("Entry, stop loss, and take profit must be valid numbers.");
+  }
+  if (trade.entry <= 0 || trade.stop <= 0 || trade.target <= 0) {
+    throw new Error("Entry, stop loss, and take profit must be greater than zero.");
+  }
+  if (!Number.isFinite(trade.quantity) || trade.quantity < 1) {
+    throw new Error("Quantity/contracts must be at least 1.");
+  }
+  if (!Number.isFinite(calc.rr) || calc.rr <= 0) {
+    throw new Error("Risk/reward needs a non-zero risk distance.");
+  }
+  return { ...trade, calculations: calc };
+}
+
+function updatePaperTradeStatus(data = latestPayload) {
+  const trade = activePaperTrade();
+  if (!trade || isOptionPaperTrade(trade.type)) return false;
+  const price = paperNumber(currentChartPrice(data));
+  if (!Number.isFinite(price)) return false;
+  const direction = paperTradeDirection(trade.type);
+  let newStatus = null;
+  if (direction === "long") {
+    if (price >= Number(trade.target)) newStatus = "TP_HIT";
+    if (price <= Number(trade.stop)) newStatus = "SL_HIT";
+  } else {
+    if (price <= Number(trade.target)) newStatus = "TP_HIT";
+    if (price >= Number(trade.stop)) newStatus = "SL_HIT";
+  }
+  if (!newStatus) return false;
+  trade.status = newStatus;
+  trade.closed_at = new Date().toISOString();
+  trade.close_reason = `Auto-marked from chart price ${price.toFixed(2)}. Paper trade only — no real order.`;
+  savePaperTrades();
+  return true;
+}
+
+function clearPaperTradeLines() {
+  for (const line of paperTradePriceLines) {
+    candleSeries.removePriceLine(line);
+  }
+  paperTradePriceLines = [];
+  if (paperTradeOverlay) paperTradeOverlay.innerHTML = "";
+}
+
+function renderPaperTradeOverlay() {
+  if (!paperTradeOverlay) return;
+  paperTradeOverlay.innerHTML = "";
+  const trade = activePaperTrade();
+  if (!trade) return;
+  if (isOptionPaperTrade(trade.type)) return;
+  const { entry, stop, target } = calculatePaperTrade(trade);
+  const coordinates = [entry, stop, target].map(price => candleSeries.priceToCoordinate(price));
+  if (!coordinates.every(Number.isFinite)) return;
+  const [entryY, stopY, targetY] = coordinates;
+  const riskTop = Math.min(entryY, stopY);
+  const riskHeight = Math.max(3, Math.abs(entryY - stopY));
+  const rewardTop = Math.min(entryY, targetY);
+  const rewardHeight = Math.max(3, Math.abs(entryY - targetY));
+  paperTradeOverlay.innerHTML = `
+    <div class="paper-zone risk" style="top:${riskTop}px;height:${riskHeight}px"><span class="paper-zone-label">RISK · Paper Trade Only</span></div>
+    <div class="paper-zone reward" style="top:${rewardTop}px;height:${rewardHeight}px"><span class="paper-zone-label">REWARD · Paper Trade Only</span></div>
+  `;
+}
+
+function renderPaperTradeLines() {
+  clearPaperTradeLines();
+  const trade = activePaperTrade();
+  if (!trade) return;
+  if (isOptionPaperTrade(trade.type)) return;
+  const { entry, stop, target } = calculatePaperTrade(trade);
+  [
+    { price: entry, color: COLORS.paperEntry, title: "ENTRY · Paper Trade Only" },
+    { price: stop, color: COLORS.paperStop, title: "SL · Paper Trade Only" },
+    { price: target, color: COLORS.paperTarget, title: "TP · Paper Trade Only" },
+  ].forEach(item => {
+    paperTradePriceLines.push(candleSeries.createPriceLine({
+      price: item.price,
+      color: item.color,
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: item.title,
+    }));
+  });
+  renderPaperTradeOverlay();
+}
+
+function paperTradeSummaryHtml(trade) {
+  if (!trade) return "No active paper trade for this symbol/timeframe.";
+  const calc = calculatePaperTrade(trade);
+  const optionNote = isOptionPaperTrade(trade.type)
+    ? `<br><span class="compare-warning">Option premium tracking manual.</span>`
+    : "";
+  return `
+    <strong>${escapeHtml(paperTradeTypeLabel(trade.type))} · ${escapeHtml(paperStatusLabel(trade.status))}</strong><br>
+    Entry ${paperMoney(calc.entry)} · SL ${paperMoney(calc.stop)} · TP ${paperMoney(calc.target)} · Qty ${calc.quantity}<br>
+    Risk ${paperMoney(calc.totalRisk)} · Reward ${paperMoney(calc.totalReward)} · R:R ${Number.isFinite(calc.rr) ? calc.rr.toFixed(2) : "n/a"}${optionNote}<br>
+    Paper trade only — no real order.
+  `;
+}
+
+function renderPaperTradePanel() {
+  setPaperTradeFormDefaults();
+  const active = activePaperTrade();
+  if (paperTradeSummary) paperTradeSummary.innerHTML = paperTradeSummaryHtml(active);
+  if (!paperTradeList) return;
+  const scoped = paperTrades
+    .filter(trade => paperTradeScopeMatches(trade))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .slice(0, 8);
+  paperTradeList.innerHTML = scoped.map(trade => {
+    const calc = calculatePaperTrade(trade);
+    const statusClass = trade.status === "ACTIVE" ? "active" : "closed";
+    return `
+      <div class="paper-trade-item ${statusClass}">
+        <div class="paper-row"><span class="paper-label">${escapeHtml(paperTradeTypeLabel(trade.type))}</span><span>${escapeHtml(paperStatusLabel(trade.status))}</span></div>
+        <div class="paper-sub">${escapeHtml(trade.symbol)} · ${escapeHtml(trade.timeframe)} · Entry ${paperMoney(calc.entry)} · SL ${paperMoney(calc.stop)} · TP ${paperMoney(calc.target)}</div>
+        <div class="paper-sub">Risk ${paperMoney(calc.totalRisk)} · Reward ${paperMoney(calc.totalReward)} · R:R ${Number.isFinite(calc.rr) ? calc.rr.toFixed(2) : "n/a"} · ${escapeHtml(new Date(trade.created_at).toLocaleString("en-US", { timeZone: "America/New_York" }))} ET</div>
+        ${trade.notes ? `<div class="paper-sub">Notes: ${escapeHtml(trade.notes)}</div>` : ""}
+        ${trade.close_reason ? `<div class="paper-sub">${escapeHtml(trade.close_reason)}</div>` : ""}
+      </div>
+    `;
+  }).join("") || `<div class="paper-meta">No paper trades saved for ${escapeHtml(activeSymbol)} ${escapeHtml(activeTimeframe)}.</div>`;
+}
+
+function renderPaperTradePlanner() {
+  updatePaperTradeStatus();
+  renderPaperTradeLines();
+  renderPaperTradePanel();
 }
 
 function levelDistanceFromPrice(level, currentPrice) {
@@ -457,6 +728,12 @@ function clearPriceLines() {
   labeledPrices = [];
   if (fvgOverlay) fvgOverlay.innerHTML = "";
   if (keyLevelEdgeMarkers) keyLevelEdgeMarkers.innerHTML = "";
+}
+
+function closePaperTradePanel() {
+  paperTradePanel?.classList.remove("visible");
+  paperTradeToggle?.classList.remove("active");
+  paperTradeToggle?.setAttribute("aria-pressed", "false");
 }
 
 function removeAiEntryMarker() {
@@ -805,6 +1082,7 @@ function scheduleChartOverlays() {
   requestAnimationFrame(() => {
     renderFvgOverlay();
     renderCoreKeyLevelEdgeMarkers();
+    renderPaperTradeOverlay();
   });
 }
 
@@ -973,10 +1251,13 @@ function updateSymbolUi() {
   symbolInput.value = activeSymbol;
   chartTitleEl.textContent = `${activeSymbol} Live Trading Review`;
   chartSubtitleEl.textContent = `${activeSymbol} · Read-only AI-assisted chart review · Eastern Time`;
+  setPaperTradeFormDefaults();
+  renderPaperTradePanel();
 }
 
 function resetSymbolScopedUi() {
   latestPayload = null;
+  clearPaperTradeLines();
   removeAiEntryMarker();
   closeLineAudit();
   closeCandleCompare();
@@ -989,6 +1270,7 @@ function resetSymbolScopedUi() {
   streamStatusEl.textContent = `${activeSymbol} stream waiting`;
   streamStatusEl.classList.remove("connected");
   streamStatusEl.classList.add("reconnecting");
+  renderPaperTradePanel();
 }
 
 function loadSelectedSymbol() {
@@ -1401,6 +1683,7 @@ async function loadInitialChart() {
 
   drawStaticLevels(data);
   updateLegend(data);
+  renderPaperTradePlanner();
 
   didInitialLoad = true;
 
@@ -1441,6 +1724,7 @@ function connectStream() {
       };
 
       updateLegend(latestPayload);
+      renderPaperTradePlanner();
     }
 
     if (data.type === "data_quality_warning") {
@@ -1452,6 +1736,7 @@ function connectStream() {
         stream_status: data.stream_status,
       };
       updateLegend(latestPayload);
+      renderPaperTradePlanner();
     }
 
     if (data.type === "heartbeat") {
@@ -1462,6 +1747,7 @@ function connectStream() {
       };
 
       updateLegend(latestPayload);
+      renderPaperTradePlanner();
     }
   };
 
@@ -1484,6 +1770,8 @@ async function reloadForTimeframe() {
     ema9Series.setData([]);
     ema20Series.setData([]);
     clearPriceLines();
+    clearPaperTradeLines();
+    renderPaperTradePanel();
 
     await loadInitialChart();
     if (requestedSymbol !== activeSymbol || requestedTimeframe !== activeTimeframe) return;
@@ -1509,6 +1797,61 @@ tfButtons.forEach((btn) => {
 
 loadSymbolButton.addEventListener("click", loadSelectedSymbol);
 rebuildChartButton?.addEventListener("click", rebuildChartData);
+paperTradeToggle?.addEventListener("click", () => {
+  const visible = !paperTradePanel?.classList.contains("visible");
+  paperTradePanel?.classList.toggle("visible", visible);
+  paperTradeToggle.classList.toggle("active", visible);
+  paperTradeToggle.setAttribute("aria-pressed", String(visible));
+  if (visible) {
+    setPaperTradeFormDefaults();
+    renderPaperTradePanel();
+  }
+});
+paperTradeClose?.addEventListener("click", closePaperTradePanel);
+paperTradeForm?.addEventListener("submit", event => {
+  event.preventDefault();
+  try {
+    const trade = readPaperTradeForm();
+    paperTrades.forEach(existing => {
+      if (paperTradeScopeMatches(existing, trade.symbol, trade.timeframe) && existing.status === "ACTIVE") {
+        existing.status = "CANCELLED";
+        existing.closed_at = new Date().toISOString();
+        existing.close_reason = "Replaced by a new local paper trade. Paper trade only — no real order.";
+      }
+    });
+    paperTrades.push(trade);
+    savePaperTrades();
+    setPaperTradeMessage("Paper trade added locally. Paper trade only — no real order.");
+    renderPaperTradePlanner();
+  } catch (error) {
+    setPaperTradeMessage(error.message, "warning");
+  }
+});
+paperCloseTradeButton?.addEventListener("click", () => {
+  const trade = activePaperTrade();
+  if (!trade) {
+    setPaperTradeMessage("No active paper trade to close for this symbol/timeframe.", "warning");
+    return;
+  }
+  trade.status = "MANUALLY_CLOSED";
+  trade.closed_at = new Date().toISOString();
+  trade.close_reason = "Manually closed locally. Paper trade only — no real order.";
+  savePaperTrades();
+  setPaperTradeMessage("Paper trade manually closed. No real order was sent.");
+  renderPaperTradePlanner();
+});
+paperClearTradeButton?.addEventListener("click", () => {
+  const trade = activePaperTrade();
+  if (trade) {
+    trade.status = "CANCELLED";
+    trade.closed_at = new Date().toISOString();
+    trade.close_reason = "Cleared from chart locally. Paper trade only — no real order.";
+    savePaperTrades();
+  }
+  resetPaperTradeForm();
+  setPaperTradeMessage("Cleared local paper trade drawing. No real order was sent.");
+  renderPaperTradePlanner();
+});
 symbolInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") loadSelectedSymbol();
 });
@@ -1609,13 +1952,16 @@ setInterval(() => {
           ema20Series.setData(indicators.ema20 || []);
           drawStaticLevels(data);
           updateLegend(data);
+          renderPaperTradePlanner();
         }
       })
       .catch(() => {});
   }
 }, 30000);
 
+loadPaperTrades();
 updateCleanModeControl();
 updateSymbolUi();
+renderPaperTradePlanner();
 reloadForTimeframe();
 refreshAiEntryMarker();

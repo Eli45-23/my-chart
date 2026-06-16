@@ -243,6 +243,147 @@
       letter-spacing: .05em;
       white-space: nowrap;
     }
+    .paper-trade-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .paper-zone {
+      position: absolute;
+      left: 0;
+      right: 82px;
+      min-height: 3px;
+      border: 1px solid rgba(255, 255, 255, .06);
+    }
+    .paper-zone.risk {
+      background: rgba(215, 121, 121, .10);
+      border-color: rgba(215, 121, 121, .20);
+    }
+    .paper-zone.reward {
+      background: rgba(101, 185, 166, .10);
+      border-color: rgba(101, 185, 166, .20);
+    }
+    .paper-zone-label {
+      position: absolute;
+      right: 10px;
+      top: 50%;
+      transform: translateY(-50%);
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(9, 14, 21, .78);
+      color: #c9d6e6;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      white-space: nowrap;
+    }
+    .paper-trade-panel {
+      position: absolute;
+      top: 12px;
+      left: 14px;
+      z-index: 6;
+      display: none;
+      width: min(390px, 36vw);
+      max-height: 74%;
+      overflow: auto;
+      border: 1px solid #31435a;
+      border-radius: 10px;
+      background: rgba(10, 16, 24, .97);
+      box-shadow: 0 18px 45px rgba(0, 0, 0, .42);
+      padding: 10px;
+    }
+    .paper-trade-panel.visible { display: block; }
+    .paper-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 8px; }
+    .paper-title { font-size: 12px; font-weight: 800; }
+    .paper-meta { color: var(--muted); font-size: 10px; }
+    .paper-close { border: 0; background: transparent; color: #9facbd; cursor: pointer; }
+    .paper-safety {
+      margin: 8px 0;
+      padding: 7px 8px;
+      border: 1px solid rgba(201, 166, 93, .3);
+      border-radius: 7px;
+      background: rgba(86, 68, 30, .16);
+      color: #dac486;
+      font-size: 10px;
+      line-height: 1.45;
+    }
+    .paper-form {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 7px;
+    }
+    .paper-field { display: grid; gap: 3px; }
+    .paper-field.wide { grid-column: 1 / -1; }
+    .paper-field label {
+      color: #8493a6;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+    .paper-field input, .paper-field select, .paper-field textarea {
+      width: 100%;
+      border: 1px solid #263448;
+      border-radius: 6px;
+      background: #101823;
+      color: #dbe5ef;
+      font: inherit;
+      font-size: 11px;
+      padding: 6px 7px;
+      outline: none;
+    }
+    .paper-field textarea { min-height: 52px; resize: vertical; }
+    .paper-field input:focus, .paper-field select:focus, .paper-field textarea:focus { border-color: #526d8d; }
+    .paper-actions { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; }
+    .paper-action-btn {
+      border: 1px solid #425f7e;
+      border-radius: 6px;
+      background: #172638;
+      color: #cbd9e8;
+      padding: 6px 8px;
+      font-size: 10px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .paper-action-btn.secondary { background: #121a25; border-color: #2d3c50; color: #aeb9c9; }
+    .paper-action-btn.danger { border-color: rgba(215, 121, 121, .42); color: #dda0a0; background: rgba(82, 38, 42, .22); }
+    .paper-message {
+      grid-column: 1 / -1;
+      color: var(--muted);
+      font-size: 10px;
+      min-height: 15px;
+    }
+    .paper-message.warning { color: var(--warn); }
+    .paper-summary {
+      margin-top: 8px;
+      padding: 8px;
+      border: 1px solid #263448;
+      border-radius: 7px;
+      background: #0d1520;
+      color: #b8c5d5;
+      font-size: 10px;
+      line-height: 1.55;
+    }
+    .paper-list {
+      display: grid;
+      gap: 5px;
+      margin-top: 8px;
+    }
+    .paper-trade-item {
+      border: 1px solid #202d3d;
+      border-radius: 7px;
+      background: #0f1722;
+      padding: 7px;
+      font-size: 10px;
+      line-height: 1.45;
+    }
+    .paper-trade-item.active { border-color: rgba(101, 185, 166, .38); }
+    .paper-trade-item.closed { opacity: .68; }
+    .paper-row { display: flex; justify-content: space-between; gap: 8px; }
+    .paper-label { color: #dbe5ef; font-weight: 800; }
+    .paper-sub { color: #8493a6; margin-top: 3px; }
     .legend-wrap {
       border-top: 1px solid var(--border);
       padding: 9px 12px 12px;
@@ -431,6 +572,7 @@
         <input class="symbol-input" id="symbolInput" type="text" value="AAPL" placeholder="Symbol" maxlength="10" aria-label="Chart symbol" />
         <button class="symbol-load-btn" id="loadSymbolButton" type="button">Load</button>
         <button class="symbol-load-btn" id="rebuildChartButton" type="button">Rebuild Chart Data</button>
+        <button class="symbol-load-btn" id="paperTradeToggle" type="button" aria-pressed="false">Paper Trade</button>
       </div>
       <div class="timeframe-group">
         <button class="tf-btn active" data-tf="1Min">1m</button>
@@ -473,6 +615,7 @@
   <div class="chart-shell">
     <div id="chart"></div>
     <div id="fvgOverlay" class="fvg-overlay" aria-hidden="true"></div>
+    <div id="paperTradeOverlay" class="paper-trade-overlay" aria-hidden="true"></div>
     <div id="keyLevelEdgeMarkers" class="key-level-edge-markers" aria-hidden="true"></div>
     <div class="brand-watermark" aria-hidden="true">E$</div>
     <div id="chartEmpty" class="chart-empty">
@@ -494,12 +637,66 @@
       <div class="compare-summary" id="candleCompareSummary">Raw provider data is preserved for read-only audit.</div>
       <div class="audit-list" id="candleCompareList"></div>
     </aside>
+    <aside id="paperTradePanel" class="paper-trade-panel" aria-label="Local paper trade planner">
+      <div class="paper-head">
+        <div><div class="paper-title">Paper Trade Planner</div><div class="paper-meta" id="paperTradeMeta">Local simulated tracker</div></div>
+        <button class="paper-close" id="paperTradeClose" type="button" aria-label="Close Paper Trade Planner">Close</button>
+      </div>
+      <div class="paper-safety">Paper trade only — no real order. This planner never sends broker orders and does not automate entries or exits.</div>
+      <form class="paper-form" id="paperTradeForm">
+        <div class="paper-field">
+          <label for="paperSymbol">Symbol</label>
+          <input id="paperSymbol" type="text" maxlength="10" autocomplete="off" />
+        </div>
+        <div class="paper-field">
+          <label for="paperTimeframe">Timeframe</label>
+          <input id="paperTimeframe" type="text" readonly />
+        </div>
+        <div class="paper-field wide">
+          <label for="paperTradeType">Trade Type</label>
+          <select id="paperTradeType">
+            <option value="LONG_STOCK">Long Stock</option>
+            <option value="SHORT_STOCK">Short Stock</option>
+            <option value="CALL_OPTION">Call Option</option>
+            <option value="PUT_OPTION">Put Option</option>
+          </select>
+        </div>
+        <div class="paper-field">
+          <label for="paperEntry">Entry Price</label>
+          <input id="paperEntry" type="number" min="0" step="0.01" inputmode="decimal" />
+        </div>
+        <div class="paper-field">
+          <label for="paperStop">Stop Loss</label>
+          <input id="paperStop" type="number" min="0" step="0.01" inputmode="decimal" />
+        </div>
+        <div class="paper-field">
+          <label for="paperTarget">Take Profit</label>
+          <input id="paperTarget" type="number" min="0" step="0.01" inputmode="decimal" />
+        </div>
+        <div class="paper-field">
+          <label for="paperQuantity">Quantity / Contracts</label>
+          <input id="paperQuantity" type="number" min="1" step="1" inputmode="numeric" value="1" />
+        </div>
+        <div class="paper-field wide">
+          <label for="paperNotes">Notes</label>
+          <textarea id="paperNotes" placeholder="Plan notes, reason, invalidation, what must happen next..."></textarea>
+        </div>
+        <div class="paper-actions">
+          <button class="paper-action-btn" type="submit">Add Paper Trade</button>
+          <button class="paper-action-btn secondary" id="paperCloseTrade" type="button">Close Paper Trade</button>
+          <button class="paper-action-btn danger" id="paperClearTrade" type="button">Clear</button>
+        </div>
+        <div class="paper-message" id="paperTradeMessage"></div>
+      </form>
+      <div class="paper-summary" id="paperTradeSummary">No active paper trade for this symbol/timeframe.</div>
+      <div class="paper-list" id="paperTradeList"></div>
+    </aside>
   </div>
   <div class="legend-wrap">
     <div class="legend" id="legend"></div>
   </div>
   <div class="error" id="error"></div>
 
-  <script src="/app_stream.js?v=stream47"></script>
+  <script src="/app_stream.js?v=stream48"></script>
 </body>
 </html>
