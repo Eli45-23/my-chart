@@ -73,6 +73,42 @@ class SetupNoiseTests(unittest.TestCase):
         self.assertTrue(all(setup["confirmation_stage"] == "WATCH" for setup in setups["setups"]))
         self.assertTrue(any("Weak zone" in " ".join(setup["confirmation_warnings"]) for setup in setups["setups"]))
 
+    def test_chart_line_audit_keeps_sr_and_zones_available_for_clean_selection(self):
+        snapshot = {
+            "levels": {},
+            "indicators": {},
+            "support_resistance": {
+                "support": [{"price": 99.8, "quality_grade": "WEAK", "quality_score": 42, "quality_reasons": ["nearest weak support"]}],
+                "resistance": [{"price": 101.2, "quality_grade": "B", "quality_score": 72, "quality_reasons": ["nearest resistance"]}],
+            },
+            "supply_demand": {
+                "demand": [self.demand_zone(grade="WEAK")],
+                "supply": [{
+                    "type": "supply",
+                    "low": 101.0,
+                    "high": 101.4,
+                    "label": "B Zone / test",
+                    "zone_quality_score": 72,
+                    "zone_quality_grade": "B",
+                    "zone_quality_reasons": ["nearest supply"],
+                    "reaction_status": "ACTIVE",
+                    "read_only": True,
+                }],
+            },
+        }
+
+        audit = server_stream.build_chart_line_registry(snapshot, "AAPL", "5Min")
+        lines_by_type = {}
+        for line in audit["chart_lines"]:
+            lines_by_type.setdefault(line["type"], []).append(line)
+
+        self.assertTrue(lines_by_type["SUPPORT"])
+        self.assertTrue(lines_by_type["RESISTANCE"])
+        self.assertTrue(lines_by_type["DEMAND_ZONE"])
+        self.assertTrue(lines_by_type["SUPPLY_ZONE"])
+        self.assertFalse(lines_by_type["SUPPORT"][0]["visible_in_clean_mode"])
+        self.assertFalse(lines_by_type["DEMAND_ZONE"][0]["visible_in_clean_mode"])
+
 
 if __name__ == "__main__":
     unittest.main()

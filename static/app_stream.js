@@ -272,6 +272,103 @@ function isCoreCleanKeyLevel(line) {
   return CORE_CLEAN_KEY_LEVEL_TYPES.has(line?.type);
 }
 
+function currentChartPrice(data = latestPayload) {
+  const latestCandle = data?.candles?.slice(-1)?.[0];
+  return data?.current_price || data?.latest_trade?.price || latestCandle?.close || null;
+}
+
+function levelDistanceFromPrice(level, currentPrice) {
+  const price = Number(level?.price);
+  const current = Number(currentPrice);
+  return Number.isFinite(price) && Number.isFinite(current) ? Math.abs(price - current) : Number.POSITIVE_INFINITY;
+}
+
+function zoneAnchorForSide(zone, side, currentPrice) {
+  const low = Number(zone?.low);
+  const high = Number(zone?.high);
+  const current = Number(currentPrice);
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return null;
+  if (Number.isFinite(current) && current >= low && current <= high) return current;
+  return side === "demand" ? high : low;
+}
+
+function zoneDistanceFromPrice(zone, side, currentPrice) {
+  const anchor = zoneAnchorForSide(zone, side, currentPrice);
+  const current = Number(currentPrice);
+  return Number.isFinite(anchor) && Number.isFinite(current) ? Math.abs(anchor - current) : Number.POSITIVE_INFINITY;
+}
+
+function selectCleanModeSupportResistance(sr, currentPrice) {
+  const current = Number(currentPrice);
+  const selectSide = (levels, side) => (levels || [])
+    .filter(level => Number.isFinite(Number(level?.price)))
+    .filter(level => !Number.isFinite(current) || (side === "support" ? Number(level.price) <= current : Number(level.price) >= current))
+    .sort((a, b) => {
+      const gradeRank = grade => ({ A: 0, B: 1, C: 2, WEAK: 3 }[grade] ?? 2);
+      return levelDistanceFromPrice(a, current) - levelDistanceFromPrice(b, current) ||
+        gradeRank(a.quality_grade) - gradeRank(b.quality_grade) ||
+        (b.quality_score || 0) - (a.quality_score || 0);
+    })
+    .slice(0, 2);
+
+  return {
+    support: selectSide(sr?.support, "support"),
+    resistance: selectSide(sr?.resistance, "resistance"),
+  };
+}
+
+function selectCleanModeSupplyDemand(sd, currentPrice) {
+  const current = Number(currentPrice);
+  const selectSide = (zones, side) => (zones || [])
+    .filter(zone => Number.isFinite(Number(zone?.low)) && Number.isFinite(Number(zone?.high)))
+    .filter(zone => {
+      if (zone.reaction_status !== "FAILED") return true;
+      const retestEdge = side === "demand" ? zone.high : zone.low;
+      return isLineNearCurrentPrice({ price: retestEdge }, current, activeSymbol);
+    })
+    .filter(zone => !Number.isFinite(current) || (side === "demand" ? Number(zone.high) <= current || isLineNearCurrentPrice({ top: zone.high, bottom: zone.low }, current, activeSymbol) : Number(zone.low) >= current || isLineNearCurrentPrice({ top: zone.high, bottom: zone.low }, current, activeSymbol)))
+    .sort((a, b) => {
+      const gradeRank = grade => ({ A: 0, B: 1, C: 2, WEAK: 3 }[grade] ?? 2);
+      return zoneDistanceFromPrice(a, side, current) - zoneDistanceFromPrice(b, side, current) ||
+        gradeRank(a.zone_quality_grade) - gradeRank(b.zone_quality_grade) ||
+        (b.zone_quality_score || 0) - (a.zone_quality_score || 0);
+    })
+    .slice(0, 1);
+
+  return {
+    demand: selectSide(sd?.demand, "demand"),
+    supply: selectSide(sd?.supply, "supply"),
+  };
+}
+
+function selectedCleanStructureIds(data = latestPayload) {
+  const currentPrice = currentChartPrice(data);
+  const selected = new Set();
+  const sr = selectCleanModeSupportResistance(data?.support_resistance || {}, currentPrice);
+  const sd = selectCleanModeSupplyDemand(data?.supply_demand || {}, currentPrice);
+  (data?.chart_lines || []).forEach(line => {
+    const anchor = lineAnchorPrice(line);
+    if (!Number.isFinite(anchor)) return;
+    if (line.type === "SUPPORT" && sr.support.some(level => Math.abs(Number(level.price) - anchor) < 0.011)) selected.add(line.id);
+    if (line.type === "RESISTANCE" && sr.resistance.some(level => Math.abs(Number(level.price) - anchor) < 0.011)) selected.add(line.id);
+    if (line.type === "DEMAND_ZONE" && sd.demand.some(zone => Math.abs(((Number(zone.low) + Number(zone.high)) / 2) - anchor) < 0.011)) selected.add(line.id);
+    if (line.type === "SUPPLY_ZONE" && sd.supply.some(zone => Math.abs(((Number(zone.low) + Number(zone.high)) / 2) - anchor) < 0.011)) selected.add(line.id);
+  });
+  return selected;
+}
+
+function isCleanModeSelectedStructure(line) {
+  return selectedCleanStructureIds().has(line?.id);
+}
+
+function cleanModeStructureHiddenReason(line) {
+  if (!["SUPPORT", "RESISTANCE", "DEMAND_ZONE", "SUPPLY_ZONE"].includes(line?.type)) return null;
+  if (line.status === "FAILED") return "failed zone not retesting";
+  if (line.strength === "WEAK") return "weak and not nearest";
+  if (["SUPPORT", "RESISTANCE"].includes(line.type)) return "extra Clean Mode support/resistance";
+  return "extra Clean Mode zone";
+}
+
 function lineDisplayDecision(line) {
   if (!isValidAuditLine(line)) return { visible: false, hiddenReason: "invalid audit metadata" };
   if (!line.visible_in_full_mode) return { visible: false, hiddenReason: "not visible in full mode" };
@@ -292,6 +389,13 @@ function lineDisplayDecision(line) {
   }
   if (["BULLISH_FVG", "BEARISH_FVG"].includes(line.type) && line.status === "FILLED") return { visible: false, hiddenReason: "filled FVG" };
   if (["BULLISH_FVG", "BEARISH_FVG"].includes(line.type) && line.status === "INVALID") return { visible: false, hiddenReason: "invalid FVG" };
+  if (["SUPPORT", "RESISTANCE", "DEMAND_ZONE", "SUPPLY_ZONE"].includes(line.type)) {
+    if (isCleanModeSelectedStructure(line)) {
+      const typeLabel = line.type === "DEMAND_ZONE" ? "demand" : line.type === "SUPPLY_ZONE" ? "supply" : line.type.toLowerCase();
+      return { visible: true, hiddenReason: `selected nearest ${typeLabel}` };
+    }
+    return { visible: false, hiddenReason: cleanModeStructureHiddenReason(line) };
+  }
   if (line.status === "FAILED") return { visible: false, hiddenReason: "failed" };
   if (line.strength === "WEAK") return { visible: false, hiddenReason: "weak" };
   if (line.priority === 3) return { visible: false, hiddenReason: "low priority" };
@@ -435,10 +539,25 @@ function findAuditLineForPlot(label, price) {
     })[0] || null;
 }
 
+function findSelectedStructureAuditLine(label, price) {
+  if (!cleanMode) return null;
+  const numericPrice = Number(price);
+  const labelText = String(label || "").toUpperCase();
+  const type = labelText.includes("SUPPORT") ? "SUPPORT" :
+    labelText.includes("RESISTANCE") ? "RESISTANCE" :
+    labelText.includes("DEMAND") ? "DEMAND_ZONE" :
+    labelText.includes("SUPPLY") ? "SUPPLY_ZONE" : null;
+  if (!type || !Number.isFinite(numericPrice)) return null;
+  return (latestPayload?.chart_lines || []).find(line =>
+    line.type === type && isCleanModeSelectedStructure(line) &&
+    Math.abs(lineAnchorPrice(line) - numericPrice) < 0.35
+  ) || null;
+}
+
 function addLevel(label, price, color, style = LightweightCharts.LineStyle.Solid, showLabel = true, lineWidth = 1) {
   if (price === null || price === undefined) return;
   const numericPrice = Number(price);
-  const auditLine = findAuditLineForPlot(label, numericPrice);
+  const auditLine = findAuditLineForPlot(label, numericPrice) || findSelectedStructureAuditLine(label, numericPrice);
   if (!auditLine) return;
   const decision = lineDisplayDecision(auditLine);
   if (!decision.visible) return;
@@ -512,7 +631,7 @@ function scheduleCoreKeyLevelEdgeMarkers() {
 }
 
 
-function addZoneBand(label, zone, colors) {
+function addZoneBand(label, zone, colors, options = {}) {
   if (!zone) return;
 
   const low = zone.low;
@@ -523,11 +642,13 @@ function addZoneBand(label, zone, colors) {
   const quality = zone.label || "Zone";
   const failed = zone.reaction_status === "FAILED";
   const weak = zone.zone_quality_grade === "WEAK" || failed;
-  const zoneColor = failed ? COLORS.failedZone : colors.zone;
-  const style = weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed;
+  const zoneColor = options.muted ? colors.zone : failed ? COLORS.failedZone : colors.zone;
+  const style = weak || options.muted ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed;
 
   if (cleanMode) {
-    if (zone.reaction_label && !failed) {
+    if (options.cleanLabel) {
+      addLevel(options.cleanLabel, (Number(low) + Number(high)) / 2, zoneColor, style, true, options.muted ? 1 : 2);
+    } else if (zone.reaction_label && !failed) {
       const reactionColor = zone.type === "demand" ? COLORS.demandReaction : COLORS.supplyReaction;
       addLevel(zone.reaction_label, zone.defended_edge, reactionColor, LightweightCharts.LineStyle.Solid, true, 2);
     } else if (!failed && !weak) {
@@ -731,14 +852,20 @@ function renderLineAudit(selectedId = null) {
   const quality = latestPayload?.data_quality_status || "DEGRADED";
   const qualityWarning = (latestPayload?.candle_data_warnings || []).join(" | ");
   lineAuditMeta.textContent = `${activeSymbol} · ${activeTimeframe} · ${visibleCount}/${lines.length} visible deterministic items · Data ${quality}${qualityWarning ? `: ${qualityWarning}` : ""}`;
-  lineAuditList.innerHTML = lines.map(line => {
+  const supportResistanceCount = lines.filter(line => ["SUPPORT", "RESISTANCE"].includes(line.type)).length;
+  const supplyDemandCount = lines.filter(line => ["DEMAND_ZONE", "SUPPLY_ZONE"].includes(line.type)).length;
+  const emptyStructureNotes = [
+    supportResistanceCount ? "" : `<div class="audit-meta">No support/resistance detected.</div>`,
+    supplyDemandCount ? "" : `<div class="audit-meta">No supply/demand zones detected.</div>`,
+  ].join("");
+  lineAuditList.innerHTML = emptyStructureNotes + (lines.map(line => {
     const decision = lineDisplayDecision(line);
     return `
     <div class="audit-item ${!decision.visible || line.status === "FAILED" || line.status === "MUTED" ? "muted" : ""} ${line.id === selectedId ? "selected" : ""}" data-line-id="${escapeHtml(line.id)}" title="${escapeHtml(line.reason)}">
       <div class="audit-row"><span class="audit-label">${escapeHtml(line.short_label)}</span><span>${escapeHtml(linePriceText(line))}</span></div>
       <div class="audit-row audit-sub"><span>${escapeHtml(line.type)}</span><span>${decision.visible ? "Visible" : `Hidden: ${escapeHtml(decision.hiddenReason)}`} · P${escapeHtml(line.priority)}</span></div>
     </div>
-  `}).join("") || `<div class="audit-meta">No registered chart lines.</div>`;
+  `}).join("") || `<div class="audit-meta">No registered chart lines.</div>`);
   const selected = lines.find(line => line.id === selectedId);
   const selectedDecision = selected ? lineDisplayDecision(selected) : null;
   lineAuditDetail.classList.toggle("visible", Boolean(selected));
@@ -1123,42 +1250,50 @@ function drawStaticLevels(data) {
 
   if (isLayerVisible("sr")) {
     const sr = data.support_resistance || {};
-    const visibleLevels = (levels) => cleanMode
-      ? (levels || []).filter(level => ["A", "B"].includes(level.quality_grade))
-      : (levels || []);
+    const cleanSr = selectCleanModeSupportResistance(sr, currentChartPrice(data));
+    const visibleLevels = (levels, side) => cleanMode ? cleanSr[side] : (levels || []);
 
-    visibleLevels(sr.resistance).forEach((level, index) => {
+    visibleLevels(sr.resistance, "resistance").forEach((level, index) => {
       const weak = level.quality_grade === "WEAK";
       addLevel(
-        `R${index + 1} ${level.quality_grade || level.reliability_label || ""} ${level.quality_score ?? level.reliability_score ?? ""}`,
+        cleanMode ? `${weak ? "WEAK " : ""}RESISTANCE` : `R${index + 1} ${level.quality_grade || level.reliability_label || ""} ${level.quality_score ?? level.reliability_score ?? ""}`,
         level.price,
         weak ? COLORS.weakResistance : COLORS.resistance,
         weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed,
-        !weak
+        true
       );
     });
 
-    visibleLevels(sr.support).forEach((level, index) => {
+    visibleLevels(sr.support, "support").forEach((level, index) => {
       const weak = level.quality_grade === "WEAK";
       addLevel(
-        `S${index + 1} ${level.quality_grade || level.reliability_label || ""} ${level.quality_score ?? level.reliability_score ?? ""}`,
+        cleanMode ? `${weak ? "WEAK " : ""}SUPPORT` : `S${index + 1} ${level.quality_grade || level.reliability_label || ""} ${level.quality_score ?? level.reliability_score ?? ""}`,
         level.price,
         weak ? COLORS.weakSupport : COLORS.support,
         weak ? LightweightCharts.LineStyle.Dotted : LightweightCharts.LineStyle.Dashed,
-        !weak
+        true
       );
     });
   }
 
   if (layerState.supplyDemand) {
     const sd = data.supply_demand || {};
+    const cleanSd = selectCleanModeSupplyDemand(sd, currentChartPrice(data));
 
-    chartSupplyDemandZones(sd.supply).forEach((zone, index) => {
-      addZoneBand(`Supply ${index + 1}`, zone, { zone: isWeakZone(zone) ? COLORS.weakSupply : COLORS.supply });
+    (cleanMode ? cleanSd.supply : chartSupplyDemandZones(sd.supply)).forEach((zone, index) => {
+      const weak = isWeakZone(zone);
+      addZoneBand(`Supply ${index + 1}`, zone, { zone: weak ? COLORS.weakSupply : COLORS.supply }, {
+        cleanLabel: cleanMode ? `${weak ? "WEAK " : ""}SUPPLY` : null,
+        muted: cleanMode && weak,
+      });
     });
 
-    chartSupplyDemandZones(sd.demand).forEach((zone, index) => {
-      addZoneBand(`Demand ${index + 1}`, zone, { zone: isWeakZone(zone) ? COLORS.weakDemand : COLORS.demand });
+    (cleanMode ? cleanSd.demand : chartSupplyDemandZones(sd.demand)).forEach((zone, index) => {
+      const weak = isWeakZone(zone);
+      addZoneBand(`Demand ${index + 1}`, zone, { zone: weak ? COLORS.weakDemand : COLORS.demand }, {
+        cleanLabel: cleanMode ? `${weak ? "WEAK " : ""}DEMAND` : null,
+        muted: cleanMode && weak,
+      });
     });
   }
 
