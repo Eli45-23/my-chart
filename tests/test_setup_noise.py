@@ -75,6 +75,7 @@ class SetupNoiseTests(unittest.TestCase):
 
     def test_chart_line_audit_keeps_sr_and_zones_available_for_clean_selection(self):
         snapshot = {
+            "current_price": 100.5,
             "levels": {},
             "indicators": {},
             "support_resistance": {
@@ -108,6 +109,29 @@ class SetupNoiseTests(unittest.TestCase):
         self.assertTrue(lines_by_type["SUPPLY_ZONE"])
         self.assertFalse(lines_by_type["SUPPORT"][0]["visible_in_clean_mode"])
         self.assertFalse(lines_by_type["DEMAND_ZONE"][0]["visible_in_clean_mode"])
+        for line_type in ["SUPPORT", "RESISTANCE", "DEMAND_ZONE", "SUPPLY_ZONE"]:
+            details = lines_by_type[line_type][0]["extra_details"]
+            self.assertIn("selected_as_nearest_clean_mode", details)
+            self.assertIn("distance_from_current_price", details)
+            self.assertIn("side", details)
+
+    def test_failed_zone_audit_metadata_marks_clean_mode_hidden_reason(self):
+        snapshot = {
+            "current_price": 100.5,
+            "levels": {},
+            "indicators": {},
+            "supply_demand": {
+                "demand": [self.demand_zone(grade="B", reaction_status="FAILED")],
+                "supply": [],
+            },
+        }
+
+        audit = server_stream.build_chart_line_registry(snapshot, "AAPL", "5Min")
+        demand_line = next(line for line in audit["chart_lines"] if line["type"] == "DEMAND_ZONE")
+
+        self.assertEqual(demand_line["status"], "FAILED")
+        self.assertFalse(demand_line["visible_in_clean_mode"])
+        self.assertEqual(demand_line["extra_details"]["hidden_reason"], "failed zone not retesting")
 
 
 if __name__ == "__main__":

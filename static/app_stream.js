@@ -628,6 +628,30 @@ function selectedCleanStructureIds(data = latestPayload) {
   return selected;
 }
 
+function selectedCleanStructureDetails(line, data = latestPayload) {
+  const current = Number(currentChartPrice(data));
+  const anchor = lineAnchorPrice(line);
+  const selected = selectedCleanStructureIds(data).has(line?.id);
+  let side = line?.extra_details?.side || "unknown";
+  if (Number.isFinite(current) && Number.isFinite(anchor)) {
+    if (line?.top !== null && line?.top !== undefined && line?.bottom !== null && line?.bottom !== undefined &&
+        Number(line.bottom) <= current && current <= Number(line.top)) {
+      side = "overlapping";
+    } else if (anchor > current) {
+      side = "above";
+    } else if (anchor < current) {
+      side = "below";
+    } else {
+      side = "overlapping";
+    }
+  }
+  return {
+    selected_as_nearest_clean_mode: selected,
+    distance_from_current_price: Number.isFinite(current) && Number.isFinite(anchor) ? Math.abs(anchor - current) : null,
+    side,
+  };
+}
+
 function isCleanModeSelectedStructure(line) {
   return selectedCleanStructureIds().has(line?.id);
 }
@@ -660,6 +684,9 @@ function lineDisplayDecision(line) {
   }
   if (["BULLISH_FVG", "BEARISH_FVG"].includes(line.type) && line.status === "FILLED") return { visible: false, hiddenReason: "filled FVG" };
   if (["BULLISH_FVG", "BEARISH_FVG"].includes(line.type) && line.status === "INVALID") return { visible: false, hiddenReason: "invalid FVG" };
+  if (["BULLISH_FVG", "BEARISH_FVG"].includes(line.type) && !line.visible_in_clean_mode) {
+    return { visible: false, hiddenReason: line.extra_details?.clean_mode_hidden_reason || line.extra_details?.hidden_reason || "not actionable in Clean Mode" };
+  }
   if (["SUPPORT", "RESISTANCE", "DEMAND_ZONE", "SUPPLY_ZONE"].includes(line.type)) {
     if (isCleanModeSelectedStructure(line)) {
       const typeLabel = line.type === "DEMAND_ZONE" ? "demand" : line.type === "SUPPLY_ZONE" ? "supply" : line.type.toLowerCase();
@@ -1019,7 +1046,8 @@ function shouldRenderFvg(gap) {
   if (!gap) return false;
   if (cleanMode && !gap.visible_in_clean_mode) return false;
   if (cleanMode && !(gap.worth_showing && ["ACTIVE", "PARTIALLY_FILLED"].includes(gap.status))) return false;
-  if (cleanMode && gap.quality_grade === "WEAK") return false;
+  if (cleanMode && ["WEAK"].includes(gap.quality_grade)) return false;
+  if (cleanMode && gap.quality_grade === "C" && !(gap.price_interacting_now && gap.has_key_confluence)) return false;
   const currentPrice = latestPayload?.current_price || latestPayload?.latest_trade?.price || latestPayload?.candles?.slice(-1)?.[0]?.close;
   if (cleanMode && !isLineNearCurrentPrice({ top: gap.top, bottom: gap.bottom }, currentPrice, activeSymbol)) return false;
   return true;
@@ -1108,18 +1136,42 @@ function linePriceText(line) {
 function fvgAuditProofHtml(line) {
   if (!["BULLISH_FVG", "BEARISH_FVG"].includes(line?.type)) return "";
   const details = line.extra_details || {};
+  const bullishProof = `${details.candle1_high ?? "n/a"} < ${details.candle3_low ?? "n/a"}`;
+  const bearishProof = `${details.candle1_low ?? "n/a"} > ${details.candle3_high ?? "n/a"}`;
+  const hiddenReason = details.clean_mode_hidden_reason || details.hidden_reason;
   return `
     <br><strong>FVG validation proof</strong><br>
+    Type / timeframe: ${escapeHtml(line.type)} / ${escapeHtml(line.timeframe || details.timeframe || "n/a")}<br>
     Direction: ${escapeHtml(details.direction || "n/a")}<br>
+    Candle times: C1 ${escapeHtml(details.candle1_time ?? "n/a")} · C2 ${escapeHtml(details.candle2_time ?? "n/a")} · C3 ${escapeHtml(details.candle3_time ?? "n/a")}<br>
+    Bullish rule: candle1.high &lt; candle3.low (${escapeHtml(bullishProof)})<br>
+    Bearish rule: candle1.low &gt; candle3.high (${escapeHtml(bearishProof)})<br>
     Rule passed: ${details.rule_passed === true ? "true" : "false"}<br>
     C1 high/low: ${escapeHtml(details.candle1_high ?? "n/a")} / ${escapeHtml(details.candle1_low ?? "n/a")}<br>
     C2 open/high/low/close: ${escapeHtml(details.candle2_open ?? "n/a")} / ${escapeHtml(details.candle2_high ?? "n/a")} / ${escapeHtml(details.candle2_low ?? "n/a")} / ${escapeHtml(details.candle2_close ?? "n/a")}<br>
     C3 high/low: ${escapeHtml(details.candle3_high ?? "n/a")} / ${escapeHtml(details.candle3_low ?? "n/a")}<br>
-    Top / bottom / midpoint: ${escapeHtml(details.top ?? line.top ?? "n/a")} / ${escapeHtml(details.bottom ?? line.bottom ?? "n/a")} / ${escapeHtml(details.midpoint ?? line.price ?? "n/a")}<br>
+    Top / bottom / midpoint / gap size: ${escapeHtml(details.top ?? line.top ?? "n/a")} / ${escapeHtml(details.bottom ?? line.bottom ?? "n/a")} / ${escapeHtml(details.midpoint ?? line.price ?? "n/a")} / ${escapeHtml(details.gap_size ?? "n/a")}<br>
     Displacement / engulfing: ${escapeHtml(details.displacement_score ?? "n/a")} / ${escapeHtml(details.engulfing_score ?? "n/a")}<br>
     C2 engulfed C1: ${details.middle_candle_engulfed_c1 === true ? "true" : "false"} · Closed beyond C1: ${details.middle_candle_closed_beyond_c1 === true ? "true" : "false"}<br>
-    Visible in Clean Mode: ${details.visible_in_clean_mode === true ? "true" : "false"}${details.hidden_reason ? ` · Hidden reason: ${escapeHtml(details.hidden_reason)}` : ""}<br>
+    Quality: ${escapeHtml(details.quality_grade ?? line.strength ?? "n/a")} · ${escapeHtml(details.quality_reason ?? "strict imbalance audit")}<br>
+    Price interacting now: ${details.price_interacting_now === true ? "true" : "false"} · Key confluence: ${details.has_key_confluence === true ? "true" : "false"}<br>
+    Primary Clean Mode FVG: ${details.selected_as_primary_clean_mode_fvg === true ? "true" : "false"}<br>
+    Visible in Clean Mode: ${details.visible_in_clean_mode === true ? "true" : "false"}${hiddenReason ? ` · Hidden reason: ${escapeHtml(hiddenReason)}` : ""}<br>
     Fill: ${escapeHtml(details.fill_percentage ?? "n/a")}% · Status: ${escapeHtml(line.status)}<br>
+    FVG = strict 3-candle imbalance only. Supply/demand/base zones are separate chart context.
+  `;
+}
+
+function structureAuditHtml(line, decision) {
+  if (!["SUPPORT", "RESISTANCE", "DEMAND_ZONE", "SUPPLY_ZONE"].includes(line?.type)) return "";
+  const details = selectedCleanStructureDetails(line);
+  const distance = Number.isFinite(details.distance_from_current_price) ? details.distance_from_current_price.toFixed(2) : "n/a";
+  return `
+    <br><strong>Clean Mode structure selection</strong><br>
+    Selected as nearest Clean Mode structure: ${details.selected_as_nearest_clean_mode ? "true" : "false"}<br>
+    Distance from current price: ${escapeHtml(distance)}<br>
+    Side: ${escapeHtml(details.side)}<br>
+    Hidden reason: ${decision?.visible ? "none" : escapeHtml(decision?.hiddenReason || line.extra_details?.hidden_reason || "n/a")}<br>
   `;
 }
 
@@ -1160,6 +1212,7 @@ function renderLineAudit(selectedId = null) {
     Reason: ${escapeHtml(selected.reason)}<br>
     Status: ${escapeHtml(selected.status)} · Strength: ${escapeHtml(selected.strength)} · Confidence: ${escapeHtml(selected.confidence ?? "n/a")}%<br>
     Defended edge: ${escapeHtml(selected.defended_edge ?? "n/a")} · Failure edge: ${escapeHtml(selected.failure_edge ?? "n/a")}<br>
+    ${structureAuditHtml(selected, selectedDecision)}
     ${fvgAuditProofHtml(selected)}
     Timeframe: ${escapeHtml(selected.timeframe)}<br>
     Warnings: ${escapeHtml((selected.warnings || []).join(" | ") || "none")}<br>

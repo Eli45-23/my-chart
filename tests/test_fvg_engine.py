@@ -206,9 +206,17 @@ class FvgEngineTests(unittest.TestCase):
         self.assertEqual(fvg_line["source"], "fvg_engine")
         self.assertEqual(fvg_line["reason"], "strict_3_candle_imbalance_with_displacement")
         self.assertTrue(fvg_line["extra_details"]["rule_passed"])
+        self.assertEqual(fvg_line["extra_details"]["candle1_time"], 1)
+        self.assertEqual(fvg_line["extra_details"]["candle2_time"], 2)
+        self.assertEqual(fvg_line["extra_details"]["candle3_time"], 3)
+        self.assertEqual(fvg_line["extra_details"]["candle1_high"], 100.2)
+        self.assertEqual(fvg_line["extra_details"]["candle3_low"], 100.8)
         self.assertEqual(fvg_line["extra_details"]["midpoint"], 100.5)
+        self.assertEqual(fvg_line["extra_details"]["gap_size"], 0.6)
         self.assertGreaterEqual(fvg_line["extra_details"]["displacement_score"], 70)
         self.assertTrue(fvg_line["extra_details"]["middle_candle_closed_beyond_c1"])
+        self.assertIn("visible_in_clean_mode", fvg_line["extra_details"])
+        self.assertIn("clean_mode_hidden_reason", fvg_line["extra_details"])
 
     def test_duplicate_overlapping_fvgs_suppress_lower_priority_clean_display(self):
         candles = [
@@ -290,6 +298,51 @@ class FvgEngineTests(unittest.TestCase):
 
         self.assertEqual(len(fvg_lines), 2)
         self.assertTrue(all(not line["visible_in_clean_mode"] for line in fvg_lines))
+
+    def test_c_grade_fvg_is_hidden_by_default_with_reason_fields(self):
+        candles = [
+            candle(1, 100.0, 100.2, 99.8, 100.05),
+            candle(2, 99.95, 101.0, 99.9, 100.9, 2500),
+            candle(3, 100.7, 101.0, 100.5, 100.8, 2000),
+        ]
+
+        gaps = server_stream.detect_fair_value_gaps(
+            candles, symbol="AAPL", timeframe="5Min", atr14=3.0,
+            levels={"hod": 100.5},
+        )
+        gap = gaps["bullish"][0]
+
+        self.assertEqual(gap["quality_grade"], "C")
+        self.assertFalse(gap["visible_in_clean_mode"])
+        self.assertFalse(gap["worth_showing"])
+        self.assertIn("C-grade FVG hidden in Clean Mode", gap["clean_mode_hidden_reason"])
+        self.assertIn("price_interacting_now", gap)
+        self.assertIn("has_key_confluence", gap)
+        self.assertFalse(gap["selected_as_primary_clean_mode_fvg"])
+
+    def test_c_grade_fvg_exception_still_requires_clean_context(self):
+        candles = [
+            candle(1, 100.0, 100.2, 99.8, 100.05),
+            candle(2, 99.95, 101.6, 99.9, 101.4, 2500),
+            candle(3, 100.8, 101.2, 100.6, 101.0, 2000),
+        ]
+        candles.extend(candle(index, 100.95, 101.15, 100.7, 101.0) for index in range(4, 34))
+        candles.append(candle(100, 100.95, 101.1, 100.55, 100.9, 1500))
+
+        gaps = server_stream.detect_fair_value_gaps(
+            candles, symbol="AAPL", timeframe="5Min", atr14=3.5,
+            levels={"hod": 100.6},
+        )
+        gap = gaps["bullish"][0]
+
+        self.assertEqual(gap["quality_grade"], "C")
+        self.assertTrue(gap["price_interacting_now"])
+        self.assertTrue(gap["has_key_confluence"])
+        self.assertFalse(gap["is_chop_context"])
+        self.assertTrue(gap["visible_in_clean_mode"])
+        self.assertTrue(gap["worth_showing"])
+        self.assertTrue(gap["selected_as_primary_clean_mode_fvg"])
+        self.assertIsNone(gap["clean_mode_hidden_reason"])
 
     def test_opening_five_minute_levels_from_validated_minutes(self):
         today = [

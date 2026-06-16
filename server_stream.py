@@ -881,6 +881,20 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
                     break
         return list(dict.fromkeys(labels))
 
+    def fvg_price_interacting_now(gap_type, bottom, top):
+        latest = candles[-1] if candles else {}
+        latest_high = latest.get("high")
+        latest_low = latest.get("low")
+        latest_close = latest.get("close")
+        if latest_high is None or latest_low is None:
+            return False
+        if ranges_overlap(bottom, top, latest_low, latest_high):
+            return True
+        if latest_close is not None and bottom - tolerance <= latest_close <= top + tolerance:
+            return True
+        edge = top if gap_type == "BULLISH_FVG" else bottom
+        return price_near(latest_close, edge) if latest_close is not None else False
+
     def candle_body(candle):
         if candle.get("open") is None or candle.get("close") is None:
             return 0
@@ -1014,6 +1028,8 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
         fill_score = 100 if status == "ACTIVE" else 72 if status == "PARTIALLY_FILLED" else 18
         size_score = 25 if gap_vs_atr < 0.12 else 95 if gap_vs_atr <= 1.4 else 55
         confluence_labels = confluence(midpoint, bottom, top)
+        has_key_confluence = bool(confluence_labels)
+        price_interacting_now = fvg_price_interacting_now(gap_type, bottom, top)
         confluence_score = min(100, len(confluence_labels) * 28)
         quality_score = int(
             freshness_score * 0.12
@@ -1066,17 +1082,31 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             hidden_reasons.append("invalid FVG")
         if grade == "WEAK":
             hidden_reasons.append("weak FVG quality")
-        if grade == "C":
+        c_grade_exception = (
+            grade == "C"
+            and status in {"ACTIVE", "PARTIALLY_FILLED"}
+            and price_interacting_now
+            and has_key_confluence
+            and metrics["displacement_score"] >= 70
+            and metrics["middle_candle_closed_beyond_c1"]
+            and metrics["middle_candle_body_overpowered_c1"]
+            and not metrics["is_chop_context"]
+        )
+        if grade == "C" and not c_grade_exception:
             hidden_reasons.append("C-grade FVG hidden in Clean Mode")
+        if grade == "C" and c_grade_exception:
+            warnings.append("C-grade FVG shown only because price is interacting with confluence.")
         if gap_vs_atr < 0.08:
             hidden_reasons.append("tiny gap")
         if metrics["displacement_score"] < 70 or not metrics["middle_candle_engulfed_c1"]:
             hidden_reasons.append("insufficient displacement/engulfing")
         if metrics["is_chop_context"]:
             hidden_reasons.append("chop context")
+        if status == "PARTIALLY_FILLED" and (fill_percentage >= 75 or touch_count >= 3):
+            hidden_reasons.append("partially filled FVG no longer cleanly respected")
         visible_in_clean_mode = (
             status in {"ACTIVE", "PARTIALLY_FILLED"}
-            and grade in {"A", "B"}
+            and (grade in {"A", "B"} or c_grade_exception)
             and metrics["displacement_score"] >= 70
             and metrics["middle_candle_closed_beyond_c1"]
             and metrics["middle_candle_body_overpowered_c1"]
@@ -1118,6 +1148,8 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             "quality_grade": grade,
             "confluence": confluence_labels,
             "confluence_count": len(confluence_labels),
+            "has_key_confluence": has_key_confluence,
+            "price_interacting_now": price_interacting_now,
             "impulse_score": impulse_score,
             "freshness_score": freshness_score,
             "size_score": size_score,
@@ -1129,7 +1161,9 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
             "is_chop_context": metrics["is_chop_context"],
             "worth_showing": visible_in_clean_mode,
             "visible_in_clean_mode": visible_in_clean_mode,
+            "clean_mode_hidden_reason": "; ".join(dict.fromkeys(hidden_reasons)) if hidden_reasons else None,
             "hidden_reason": "; ".join(dict.fromkeys(hidden_reasons)) if hidden_reasons else None,
+            "selected_as_primary_clean_mode_fvg": False,
             "source": "fvg_engine",
             "reason": "strict_3_candle_imbalance_with_displacement",
             "rule_passed": True,
@@ -1163,10 +1197,13 @@ def detect_fair_value_gaps(candles, symbol=SYMBOL, timeframe="1Min", levels=None
         if duplicate:
             gap["visible_in_clean_mode"] = False
             gap["worth_showing"] = False
+            gap["selected_as_primary_clean_mode_fvg"] = False
             reason = "duplicate lower-priority FVG"
             gap["hidden_reason"] = f"{gap.get('hidden_reason')}; {reason}" if gap.get("hidden_reason") else reason
+            gap["clean_mode_hidden_reason"] = gap["hidden_reason"]
             gap["warnings"].append("Duplicate lower-priority FVG hidden in Clean Mode.")
         else:
+            gap["selected_as_primary_clean_mode_fvg"] = True
             clean_representatives.append(gap)
     bullish = [gap for gap in gaps if gap["type"] == "BULLISH_FVG"][:8]
     bearish = [gap for gap in gaps if gap["type"] == "BEARISH_FVG"][:8]
@@ -5411,6 +5448,27 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
     def numeric(value):
         return isinstance(value, (int, float)) and math.isfinite(value)
 
+    def line_side(anchor, top=None, bottom=None):
+        if not numeric(current_price) or not numeric(anchor):
+            return "unknown"
+        if numeric(top) and numeric(bottom) and bottom <= current_price <= top:
+            return "overlapping"
+        if anchor > current_price:
+            return "above"
+        if anchor < current_price:
+            return "below"
+        return "overlapping"
+
+    def structure_audit_details(anchor, top=None, bottom=None):
+        if not numeric(anchor) and numeric(top) and numeric(bottom):
+            anchor = (top + bottom) / 2
+        return {
+            "selected_as_nearest_clean_mode": False,
+            "distance_from_current_price": round_price(abs(anchor - current_price)) if numeric(anchor) and numeric(current_price) else None,
+            "side": line_side(anchor, top=top, bottom=bottom),
+            "hidden_reason": None,
+        }
+
     def add(
         line_type,
         label,
@@ -5500,6 +5558,8 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
         for item in support_resistance.get(side, []) or []:
             grade = item.get("quality_grade") or "UNKNOWN"
             score = item.get("quality_score")
+            details = structure_audit_details(item.get("price"))
+            details["hidden_reason"] = None if grade in {"A", "B"} else "weak and not nearest unless selected by Clean Mode"
             add(
                 line_type, f"{short} {grade}", short, "swing_detection",
                 "Weighted level quality from touches, reaction, freshness, confluence, distance, and cleanliness",
@@ -5508,6 +5568,7 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
                 status="MUTED" if grade == "WEAK" else "ACTIVE",
                 priority=2 if grade in {"A", "B"} else 3, clean=grade in {"A", "B"},
                 item_warnings=item.get("warnings") or [],
+                extra_details=details,
             )
 
     supply_demand = snapshot.get("supply_demand") or {}
@@ -5517,6 +5578,9 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
             reaction = zone.get("reaction_status")
             failed = reaction == "FAILED"
             status = "FAILED" if failed else "HOLDING" if reaction in {"HOLD", "RECLAIM", "REJECTION"} else "ACTIVE"
+            zone_anchor = ((zone.get("high") or 0) + (zone.get("low") or 0)) / 2 if numeric(zone.get("high")) and numeric(zone.get("low")) else None
+            details = structure_audit_details(zone_anchor, top=zone.get("high"), bottom=zone.get("low"))
+            details["hidden_reason"] = "failed zone not retesting" if failed else None if grade in {"A", "B"} else "weak and not nearest unless selected by Clean Mode"
             add(
                 zone_type, f"{short} Zone {grade}", short, "supply_demand_engine",
                 "Deterministic supply/demand zone detection and quality scoring",
@@ -5527,6 +5591,7 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
                 priority=2 if grade in {"A", "B"} else 3,
                 clean=not failed and grade in {"A", "B"} and reaction in {"HOLD", "RECLAIM", "REJECTION"},
                 item_warnings=zone.get("reaction_warnings") or [],
+                extra_details=details,
             )
             if reaction in {"HOLD", "RECLAIM", "REJECTION", "FAILED"}:
                 reaction_type = f"{side.upper()}_{reaction}"
@@ -5610,7 +5675,13 @@ def build_chart_line_registry(snapshot, symbol, timeframe):
                 "middle_candle_closed_beyond_c1": gap.get("middle_candle_closed_beyond_c1"),
                 "is_chop_context": gap.get("is_chop_context"),
                 "visible_in_clean_mode": gap.get("visible_in_clean_mode"),
+                "clean_mode_hidden_reason": gap.get("clean_mode_hidden_reason"),
                 "hidden_reason": gap.get("hidden_reason"),
+                "price_interacting_now": gap.get("price_interacting_now"),
+                "has_key_confluence": gap.get("has_key_confluence"),
+                "selected_as_primary_clean_mode_fvg": gap.get("selected_as_primary_clean_mode_fvg"),
+                "quality_grade": gap.get("quality_grade"),
+                "quality_reason": "; ".join(gap.get("warnings") or []) or gap.get("reason"),
                 "source": gap.get("source"),
                 "reason": gap.get("reason"),
             },
@@ -8269,6 +8340,15 @@ def performance_dashboard():
       font-size: 12px;
       margin: -6px 0 14px;
     }
+    .ai-export-reminder {
+      color: #b6a16a;
+      font-size: 11px;
+      margin: -7px 0 14px;
+      padding: 7px 9px;
+      border: 1px solid rgba(201, 166, 93, .26);
+      border-radius: 9px;
+      background: rgba(80, 63, 29, .14);
+    }
     .ai-recommendation.active {
       color: var(--warn);
       font-weight: bold;
@@ -8368,6 +8448,7 @@ def performance_dashboard():
       Read-only review. Not financial advice. Not an order. Confirm manually. Do not chase.
     </div>
     <div id="aiRecommendation" class="ai-recommendation">No new AI review recommendation.</div>
+    <div class="ai-export-reminder">Click AI Review before exporting if you want a fresh OpenAI review saved.</div>
     <div class="ai-controls">
       <div class="control">
         <label for="aiSymbol">Symbol</label>

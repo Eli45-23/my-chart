@@ -152,6 +152,8 @@ FVG objects include status and context such as:
 
 FVGs are context only. They are not automatic entries.
 
+Trader Clean Mode shows only the cleanest FVG context by default. A/B active FVGs near current price may display; C-grade FVGs stay hidden unless price is directly interacting with the gap and there is key-level, supply/demand, or support/resistance confluence. WEAK, FILLED, duplicate, tiny, chop-context, or low-displacement FVGs remain Full Mode / Line Audit context only.
+
 ### Supply / Demand And Zone Reactions
 
 The chart detects and audits supply/demand zones and reaction behavior.
@@ -169,7 +171,7 @@ Failed and weak zones are not allowed to create misleading trade excitement. Fai
 
 ### Support And Resistance
 
-Support/resistance levels are scored and audited. Trader Clean Mode should show the nearest relevant support/resistance context without flooding the chart with every possible level.
+Support/resistance levels are scored and audited. Trader Clean Mode always tries to show the nearest relevant support and resistance context without flooding the chart with every possible level. It also tries to preserve the nearest meaningful demand and supply zones, muting weak nearest structures when they are the only useful nearby context.
 
 ### Chart Line Audit
 
@@ -189,6 +191,8 @@ It tracks:
 - priority
 - Clean Mode visibility
 - hidden reason, when hidden
+- nearest-structure selection details for support/resistance and supply/demand
+- strict FVG proof, including candle 1 / candle 3 rule values, top, bottom, midpoint, gap size, quality, fill, and hidden reason
 
 Open the **Line Audit** panel on the chart, or use:
 
