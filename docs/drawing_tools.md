@@ -35,10 +35,23 @@ This adds TradingView-style manual drawing tools to the chart frontend in a safe
 Start the Flask server normally, then open:
 
 ```text
-http://127.0.0.1:8900/index_stream_draw.html
+http://127.0.0.1:8900/
 ```
 
-The original chart page is left unchanged. The drawing page loads the existing chart frontend plus `drawing_tools.js`.
+The normal chart page loads the existing chart frontend plus `drawing_tools.js`.
+`index_stream_draw.html` can remain as a backup/reference page.
+
+## Editing
+
+- Drawings start locked so normal chart pan/scroll behavior is preserved.
+- Pick a drawing tool to unlock drawing interaction.
+- Pick **Select** or press `V` to select and edit an existing drawing.
+- Drag the drawing body to move it.
+- Drag visible handles to edit line endpoints, box corners, text anchors, or range anchors.
+- Double-click text labels to edit their text.
+- Press `Delete`/`Backspace` to remove the selected drawing.
+- Press `Esc` to cancel a draft or deselect.
+- Press `Cmd+Z`/`Ctrl+Z` to undo the latest drawing action.
 
 ## Notes
 

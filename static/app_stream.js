@@ -220,6 +220,24 @@ const candleSeries = chart.addCandlestickSeries({
   priceLineStyle: LightweightCharts.LineStyle.Dotted,
 });
 
+window.ChartRuntime = {
+  chart,
+  candleSeries,
+  chartEl,
+  get activeSymbol() {
+    return activeSymbol;
+  },
+  get activeTimeframe() {
+    return activeTimeframe;
+  },
+  get latestPayload() {
+    return latestPayload;
+  },
+  requestDrawingRedraw() {
+    window.dispatchEvent(new CustomEvent("chart-runtime-redraw"));
+  },
+};
+
 const vwapSeries = chart.addLineSeries({
   color: "#d2aa53",
   lineWidth: 2,
@@ -1111,6 +1129,7 @@ function scheduleChartOverlays() {
     renderFvgOverlay();
     renderCoreKeyLevelEdgeMarkers();
     renderPaperTradeOverlay();
+    window.ChartRuntime?.requestDrawingRedraw?.();
   });
 }
 
