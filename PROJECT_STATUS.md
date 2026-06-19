@@ -22,10 +22,9 @@
 
 ## Next Priorities
 
-1. Add an explicit dependency manifest and installation path.
-2. Separate page styling and archive obsolete drawing-page reference files.
-3. Expand deterministic backend coverage and cautiously extract pure helpers.
-4. Add holiday-calendar support and clarify paper-option planning limits.
+1. Separate page styling and archive obsolete drawing-page reference files.
+2. Expand deterministic backend coverage and cautiously extract pure helpers.
+3. Add holiday-calendar support and clarify paper-option planning limits.
 
 ## Safety Rules
 
@@ -51,7 +50,7 @@ Baseline recorded 2026-06-19:
 | --- | --- | --- |
 | Baseline | Complete | Existing checks pass; local `server_stream.log` left untracked. |
 | 1. Project status tracker | Complete | Added this living status document. |
-| 2. Requirements file | Pending | |
+| 2. Requirements file | Complete | Added `requirements.txt`; README now installs from it. |
 | 3. Git ignore review | Pending | |
 | 4. Extract chart CSS | Pending | |
 | 5. Archive drawing references | Pending | |

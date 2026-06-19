@@ -109,7 +109,7 @@ source .venv/bin/activate
 Install required packages:
 
 ```bash
-python3 -m pip install flask python-dotenv websocket-client requests openai
+python3 -m pip install -r requirements.txt
 ```
 
 If future features add packages, install them into the same `.venv`.
