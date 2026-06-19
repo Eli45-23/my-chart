@@ -2,7 +2,7 @@
 
 ## Overall
 
-- Completion estimate: 75%
+- Completion estimate: 100%
 - Last updated: 2026-06-19
 - Application: local read-only chart and trading-review dashboard at `http://127.0.0.1:8900/`
 
@@ -34,13 +34,13 @@
 
 ## Last Checks
 
-Baseline recorded 2026-06-19:
+Final verification recorded 2026-06-19:
 
 - `python3 -m py_compile server_stream.py`: passed
 - `python3 -m compileall -q .`: passed
 - `node --check static/app_stream.js`: passed
 - `node --check static/drawing_tools.js`: passed
-- `python3 -m unittest discover -s tests -v`: passed (32 tests)
+- `python3 -m unittest discover -s tests -v`: passed (39 tests)
 - `git diff --check`: passed
 
 ## Task History
@@ -58,3 +58,4 @@ Baseline recorded 2026-06-19:
 | 8. Pure-helper module split | Complete | Extracted static defaults, market-time helpers, and indicators into focused modules without touching live streams or routes. |
 | 9. Market holiday calendar | Complete | Added deterministic common U.S. full-day market holidays to session status. |
 | 10. Option paper-trade wording | Complete | Clarified premium-based option planning, manual tracking, delta context, and the difference from stock-chart levels. |
+| Final verification | Complete | Syntax, compile, deterministic tests, and local chart/dashboard responses passed. |
