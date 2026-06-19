@@ -54,7 +54,7 @@ Baseline recorded 2026-06-19:
 | 4. Extract chart CSS | Complete | Moved main-page inline CSS into `static/chart.css` with a cache-busted stylesheet link. |
 | 5. Archive drawing references | Complete | Moved obsolete drawing-only reference files into `docs/reference/`. |
 | 6. Core backend tests | Complete | Added deterministic coverage for symbols, dates, session status, indicators, levels, and safe fallback review. |
-| 7. Frontend smoke checklist | Pending | |
+| 7. Frontend smoke checklist | Complete | Added a reusable manual chart, drawing-tool, dashboard, and console checklist. |
 | 8. Pure-helper module split | Pending | |
 | 9. Market holiday calendar | Pending | |
 | 10. Option paper-trade wording | Pending | |

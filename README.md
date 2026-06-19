@@ -74,6 +74,7 @@ static/drawing_tools.js          Editable TradingView-style manual drawing tools
 static/chart.css                 Main chart stylesheet
 docs/reference/                  Archived drawing-page reference files (not used by the app)
 docs/drawing_tools.md            Drawing tools documentation
+docs/frontend_smoke_test.md      Manual frontend verification checklist
 docs/ai_trading_playbook.md      AI review doctrine and safety rules
 tests/                           Deterministic test suite
 README.md                        Project documentation
@@ -90,6 +91,8 @@ http://127.0.0.1:8900/
 The normal page is the main chart page. Drawing tools are loaded directly on this page.
 
 The older drawing-only page and stylesheet live in `docs/reference/` as backups only. Normal use happens on `/`.
+
+Use the [frontend smoke-test checklist](docs/frontend_smoke_test.md) after chart or drawing-tool changes.
 
 ## Installation
 
