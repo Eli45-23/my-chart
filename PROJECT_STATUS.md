@@ -22,7 +22,7 @@
 
 ## Next Priorities
 
-1. Separate page styling and archive obsolete drawing-page reference files.
+1. Archive obsolete drawing-page reference files.
 2. Expand deterministic backend coverage and cautiously extract pure helpers.
 3. Add holiday-calendar support and clarify paper-option planning limits.
 
@@ -52,7 +52,7 @@ Baseline recorded 2026-06-19:
 | 1. Project status tracker | Complete | Added this living status document. |
 | 2. Requirements file | Complete | Added `requirements.txt`; README now installs from it. |
 | 3. Git ignore review | Complete | Expanded local/secrets ignore coverage; no ignored secrets or artifacts are tracked. |
-| 4. Extract chart CSS | Pending | |
+| 4. Extract chart CSS | Complete | Moved main-page inline CSS into `static/chart.css` with a cache-busted stylesheet link. |
 | 5. Archive drawing references | Pending | |
 | 6. Core backend tests | Pending | |
 | 7. Frontend smoke checklist | Pending | |
