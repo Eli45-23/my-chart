@@ -22,9 +22,8 @@
 
 ## Next Priorities
 
-1. Archive obsolete drawing-page reference files.
-2. Expand deterministic backend coverage and cautiously extract pure helpers.
-3. Add holiday-calendar support and clarify paper-option planning limits.
+1. Expand deterministic backend coverage and cautiously extract pure helpers.
+2. Add holiday-calendar support and clarify paper-option planning limits.
 
 ## Safety Rules
 
@@ -53,7 +52,7 @@ Baseline recorded 2026-06-19:
 | 2. Requirements file | Complete | Added `requirements.txt`; README now installs from it. |
 | 3. Git ignore review | Complete | Expanded local/secrets ignore coverage; no ignored secrets or artifacts are tracked. |
 | 4. Extract chart CSS | Complete | Moved main-page inline CSS into `static/chart.css` with a cache-busted stylesheet link. |
-| 5. Archive drawing references | Pending | |
+| 5. Archive drawing references | Complete | Moved obsolete drawing-only reference files into `docs/reference/`. |
 | 6. Core backend tests | Pending | |
 | 7. Frontend smoke checklist | Pending | |
 | 8. Pure-helper module split | Pending | |

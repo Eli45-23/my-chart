@@ -71,8 +71,8 @@ server_stream.py                 Flask app, APIs, Alpaca data, stream, chart eng
 static/index_stream.html         Main chart page served at /
 static/app_stream.js             Chart frontend, overlays, controls, audits, paper planner, live updates
 static/drawing_tools.js          Editable TradingView-style manual drawing tools
-static/index_stream_draw.html    Backup/reference drawing page
-static/drawing_tools_page.css    Backup/reference drawing-page stylesheet
+static/chart.css                 Main chart stylesheet
+docs/reference/                  Archived drawing-page reference files (not used by the app)
 docs/drawing_tools.md            Drawing tools documentation
 docs/ai_trading_playbook.md      AI review doctrine and safety rules
 tests/                           Deterministic test suite
@@ -89,7 +89,7 @@ http://127.0.0.1:8900/
 
 The normal page is the main chart page. Drawing tools are loaded directly on this page.
 
-The older drawing-only page can remain as a backup/reference page, but normal use should happen on `/`.
+The older drawing-only page and stylesheet live in `docs/reference/` as backups only. Normal use happens on `/`.
 
 ## Installation
 

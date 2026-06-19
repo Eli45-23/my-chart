@@ -39,7 +39,7 @@ http://127.0.0.1:8900/
 ```
 
 The normal chart page loads the existing chart frontend plus `drawing_tools.js`.
-`index_stream_draw.html` can remain as a backup/reference page.
+`docs/reference/index_stream_draw.html` remains as a backup/reference page and is not served by the app.
 
 ## Editing
 
