@@ -345,12 +345,16 @@ It can track simulated entries, stops, targets, quantity/contracts, and notes.
 
 It does **not** send real orders.
 
+For call and put plans, entry, stop, and target values are **option premiums** and each contract uses a 100x multiplier. Stock-chart levels are useful context, but they are not exact option TP/SL levels. Manage premium levels on the option chart or estimate their stock-price relationship with delta. Option premium tracking is manual in this version.
+
 The planner is useful for:
 
 - planning risk before entry
 - marking stop-loss and take-profit zones
 - reviewing ideas after the move
 - practicing discipline without automation
+
+Every planner label remains: **Paper trade only — no real order.**
 
 ## Line Audit
 

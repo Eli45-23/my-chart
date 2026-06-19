@@ -38,6 +38,11 @@ const paperTradeForm = document.getElementById("paperTradeForm");
 const paperSymbolInput = document.getElementById("paperSymbol");
 const paperTimeframeInput = document.getElementById("paperTimeframe");
 const paperTradeTypeInput = document.getElementById("paperTradeType");
+const paperEntryLabel = document.getElementById("paperEntryLabel");
+const paperStopLabel = document.getElementById("paperStopLabel");
+const paperTargetLabel = document.getElementById("paperTargetLabel");
+const paperQuantityLabel = document.getElementById("paperQuantityLabel");
+const paperOptionNotice = document.getElementById("paperOptionNotice");
 const paperEntryInput = document.getElementById("paperEntry");
 const paperStopInput = document.getElementById("paperStop");
 const paperTargetInput = document.getElementById("paperTarget");
@@ -403,6 +408,21 @@ function setPaperTradeFormDefaults() {
   paperTimeframeInput.value = activeTimeframe;
   paperTradeMeta.textContent = `${activeSymbol} · ${activeTimeframe} · browser-local only`;
   if (!paperQuantityInput.value) paperQuantityInput.value = "1";
+  updatePaperTradeInputLanguage();
+}
+
+function updatePaperTradeInputLanguage() {
+  const optionMode = isOptionPaperTrade(paperTradeTypeInput?.value);
+  if (paperEntryLabel) paperEntryLabel.textContent = optionMode ? "Entry Premium" : "Entry Price";
+  if (paperStopLabel) paperStopLabel.textContent = optionMode ? "Stop Premium" : "Stop Loss";
+  if (paperTargetLabel) paperTargetLabel.textContent = optionMode ? "Target Premium" : "Take Profit";
+  if (paperQuantityLabel) paperQuantityLabel.textContent = optionMode ? "Contracts (x100)" : "Shares";
+  if (paperOptionNotice) {
+    paperOptionNotice.hidden = !optionMode;
+    paperOptionNotice.textContent = optionMode
+      ? "Option planner is premium-based. Stock-chart levels are not exact option TP/SL levels; manage on the option premium chart or estimate with delta. Option premium tracking is manual."
+      : "";
+  }
 }
 
 function resetPaperTradeForm(keepSymbol = true) {
@@ -526,7 +546,7 @@ function paperTradeSummaryHtml(trade) {
   if (!trade) return "No active paper trade for this symbol/timeframe.";
   const calc = calculatePaperTrade(trade);
   const optionNote = isOptionPaperTrade(trade.type)
-    ? `<br><span class="compare-warning">Option premium tracking manual.</span>`
+    ? `<br><span class="compare-warning">Premium-based plan only. Stock-chart levels are not exact option TP/SL levels; manage the option premium chart or estimate with delta. Option premium tracking is manual.</span>`
     : "";
   return `
     <strong>${escapeHtml(paperTradeTypeLabel(trade.type))} · ${escapeHtml(paperStatusLabel(trade.status))}</strong><br>
@@ -553,6 +573,7 @@ function renderPaperTradePanel() {
         <div class="paper-row"><span class="paper-label">${escapeHtml(paperTradeTypeLabel(trade.type))}</span><span>${escapeHtml(paperStatusLabel(trade.status))}</span></div>
         <div class="paper-sub">${escapeHtml(trade.symbol)} · ${escapeHtml(trade.timeframe)} · Entry ${paperMoney(calc.entry)} · SL ${paperMoney(calc.stop)} · TP ${paperMoney(calc.target)}</div>
         <div class="paper-sub">Risk ${paperMoney(calc.totalRisk)} · Reward ${paperMoney(calc.totalReward)} · R:R ${Number.isFinite(calc.rr) ? calc.rr.toFixed(2) : "n/a"} · ${escapeHtml(new Date(trade.created_at).toLocaleString("en-US", { timeZone: "America/New_York" }))} ET</div>
+        ${isOptionPaperTrade(trade.type) ? `<div class="paper-sub compare-warning">Premium-based option plan; stock-chart levels are not exact option TP/SL levels. Manual premium tracking only.</div>` : ""}
         ${trade.notes ? `<div class="paper-sub">Notes: ${escapeHtml(trade.notes)}</div>` : ""}
         ${trade.close_reason ? `<div class="paper-sub">${escapeHtml(trade.close_reason)}</div>` : ""}
       </div>
@@ -1880,6 +1901,7 @@ paperTradeToggle?.addEventListener("click", () => {
   }
 });
 paperTradeClose?.addEventListener("click", closePaperTradePanel);
+paperTradeTypeInput?.addEventListener("change", updatePaperTradeInputLanguage);
 paperTradeForm?.addEventListener("submit", event => {
   event.preventDefault();
   try {

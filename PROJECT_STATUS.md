@@ -23,7 +23,7 @@
 ## Next Priorities
 
 1. Expand deterministic backend coverage and cautiously extract pure helpers.
-2. Clarify paper-option planning limits.
+2. Maintain deterministic coverage as new chart features are added.
 
 ## Safety Rules
 
@@ -57,4 +57,4 @@ Baseline recorded 2026-06-19:
 | 7. Frontend smoke checklist | Complete | Added a reusable manual chart, drawing-tool, dashboard, and console checklist. |
 | 8. Pure-helper module split | Complete | Extracted static defaults, market-time helpers, and indicators into focused modules without touching live streams or routes. |
 | 9. Market holiday calendar | Complete | Added deterministic common U.S. full-day market holidays to session status. |
-| 10. Option paper-trade wording | Pending | |
+| 10. Option paper-trade wording | Complete | Clarified premium-based option planning, manual tracking, delta context, and the difference from stock-chart levels. |

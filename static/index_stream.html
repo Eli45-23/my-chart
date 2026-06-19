@@ -107,21 +107,22 @@
           </select>
         </div>
         <div class="paper-field">
-          <label for="paperEntry">Entry Price</label>
+          <label for="paperEntry" id="paperEntryLabel">Entry Price</label>
           <input id="paperEntry" type="number" min="0" step="0.01" inputmode="decimal" />
         </div>
         <div class="paper-field">
-          <label for="paperStop">Stop Loss</label>
+          <label for="paperStop" id="paperStopLabel">Stop Loss</label>
           <input id="paperStop" type="number" min="0" step="0.01" inputmode="decimal" />
         </div>
         <div class="paper-field">
-          <label for="paperTarget">Take Profit</label>
+          <label for="paperTarget" id="paperTargetLabel">Take Profit</label>
           <input id="paperTarget" type="number" min="0" step="0.01" inputmode="decimal" />
         </div>
         <div class="paper-field">
-          <label for="paperQuantity">Quantity / Contracts</label>
+          <label for="paperQuantity" id="paperQuantityLabel">Quantity / Contracts</label>
           <input id="paperQuantity" type="number" min="1" step="1" inputmode="numeric" value="1" />
         </div>
+        <div class="paper-safety" id="paperOptionNotice" hidden></div>
         <div class="paper-field wide">
           <label for="paperNotes">Notes</label>
           <textarea id="paperNotes" placeholder="Plan notes, reason, invalidation, what must happen next..."></textarea>
