@@ -17,7 +17,7 @@
 ## Known Issues / Manual Review
 
 - Exchange-holiday recognition is not yet implemented; session status currently warns users to verify holidays manually.
-- `server_stream.log` is a local runtime artifact and is intentionally left untracked.
+- Local logs, exports, virtual environments, archives, and backups are ignored. No ignored secrets are tracked.
 - Live Alpaca/OpenAI checks require the relevant local environment variables and account access.
 
 ## Next Priorities
@@ -51,7 +51,7 @@ Baseline recorded 2026-06-19:
 | Baseline | Complete | Existing checks pass; local `server_stream.log` left untracked. |
 | 1. Project status tracker | Complete | Added this living status document. |
 | 2. Requirements file | Complete | Added `requirements.txt`; README now installs from it. |
-| 3. Git ignore review | Pending | |
+| 3. Git ignore review | Complete | Expanded local/secrets ignore coverage; no ignored secrets or artifacts are tracked. |
 | 4. Extract chart CSS | Pending | |
 | 5. Archive drawing references | Pending | |
 | 6. Core backend tests | Pending | |

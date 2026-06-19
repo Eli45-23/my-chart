@@ -1,8 +1,16 @@
 .env
 .venv/
+venv/
 __pycache__/
 *.pyc
 .DS_Store
+logs/
+*.log
+*.zip
+exports/
+local_exports/
+.pytest_cache/
+node_modules/
 
 # Local backup/checkpoint files
 *_backup.*
@@ -12,6 +20,3 @@ __pycache__/
 *_working_v*.py
 *_working_v*.js
 *_working_v*.html
-logs/*.jsonl
-exports/
-*.zip
