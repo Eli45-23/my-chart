@@ -53,7 +53,7 @@ Baseline recorded 2026-06-19:
 | 3. Git ignore review | Complete | Expanded local/secrets ignore coverage; no ignored secrets or artifacts are tracked. |
 | 4. Extract chart CSS | Complete | Moved main-page inline CSS into `static/chart.css` with a cache-busted stylesheet link. |
 | 5. Archive drawing references | Complete | Moved obsolete drawing-only reference files into `docs/reference/`. |
-| 6. Core backend tests | Pending | |
+| 6. Core backend tests | Complete | Added deterministic coverage for symbols, dates, session status, indicators, levels, and safe fallback review. |
 | 7. Frontend smoke checklist | Pending | |
 | 8. Pure-helper module split | Pending | |
 | 9. Market holiday calendar | Pending | |
