@@ -536,7 +536,7 @@ Local review exports and generated files should stay local unless intentionally 
 
 - Local development Flask server only; not production deployment.
 - Live market behavior must be tested during active market sessions.
-- Exchange holidays should be verified manually if holiday-calendar logic is not enabled.
+- Common full-day U.S. market holidays are recognized. Early closes and unusual exchange closures still need manual verification.
 - Market data can still contain provider anomalies, even with validation.
 - FVGs, zones, support/resistance, drawings, and AI review are context only.
 - No order execution is implemented.

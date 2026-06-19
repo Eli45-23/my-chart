@@ -42,6 +42,29 @@ class CoreLogicTests(unittest.TestCase):
         premarket = market_time.build_market_session_status(datetime(2026, 6, 15, 8, tzinfo=ET))
         self.assertEqual(premarket["session_label"], "PREMARKET")
 
+    def test_common_market_holidays_close_the_session(self):
+        for holiday in [
+            date(2026, 1, 1),   # New Year's Day
+            date(2026, 1, 19),  # Martin Luther King Jr. Day
+            date(2026, 2, 16),  # Presidents' Day
+            date(2026, 4, 3),   # Good Friday
+            date(2026, 5, 25),  # Memorial Day
+            date(2026, 6, 19),  # Juneteenth
+            date(2026, 7, 3),   # Independence Day observed
+            date(2026, 9, 7),   # Labor Day
+            date(2026, 11, 26), # Thanksgiving
+            date(2026, 12, 25), # Christmas
+        ]:
+            with self.subTest(holiday=holiday):
+                status = market_time.build_market_session_status(datetime(holiday.year, holiday.month, holiday.day, 10, tzinfo=ET))
+                self.assertTrue(market_time.is_market_holiday(holiday))
+                self.assertEqual(status["session_label"], "CLOSED")
+                self.assertEqual(status["market_closed_reason"], "Market holiday")
+                self.assertTrue(status["holiday_calendar_enabled"])
+
+        normal = market_time.build_market_session_status(datetime(2026, 6, 18, 10, tzinfo=ET))
+        self.assertEqual(normal["session_label"], "REGULAR")
+
     def test_ema_and_vwap_use_candle_values(self):
         candles = [
             candle(1, 10, 11, 9, 10, 100),

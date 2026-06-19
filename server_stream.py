@@ -6765,6 +6765,8 @@ def build_fallback_direct_answer(user_message, chart_summary, market_session_sta
         session_label = market_session_status.get("session_label")
         if market_session_status.get("is_weekend"):
             return "The regular U.S. stock market session is closed today because it is the weekend."
+        if market_session_status.get("market_closed_reason") == "Market holiday":
+            return "The U.S. stock market is closed today because it is a market holiday."
         if session_label == "REGULAR":
             answer = "The regular U.S. stock market session is open now."
         elif session_label == "PREMARKET":
@@ -7172,8 +7174,8 @@ def call_openai_trade_review(snapshot, user_message=None):
         "related-market context, and backend gates. Treat FAILED zones as invalidated context. "
         "If the user asks whether the market is open, answer using market_session_status only and never guess from "
         "general knowledge. If it says CLOSED, say the market is closed. If it is a weekend, clearly say the regular "
-        "U.S. stock market session is closed because it is the weekend. When holiday_calendar_enabled is false on a "
-        "weekday, mention that exchange holidays must be verified manually. "
+        "U.S. stock market session is closed because it is the weekend. When the session status says Market holiday, "
+        "say the market is closed for that holiday. "
         "When user_message is provided, answer the user's exact question first in direct_answer, then explain how "
         f"it applies to the current {active_symbol} snapshot in application_to_current_setup. If the user asks about "
         f"a different symbol, clarify that the active chart symbol is {active_symbol}. If asked about reliable sources, "

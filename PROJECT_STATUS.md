@@ -16,14 +16,14 @@
 
 ## Known Issues / Manual Review
 
-- Exchange-holiday recognition is not yet implemented; session status currently warns users to verify holidays manually.
+- Common full-day U.S. equity holidays are recognized; early closes and unusual exchange closures still need manual verification.
 - Local logs, exports, virtual environments, archives, and backups are ignored. No ignored secrets are tracked.
 - Live Alpaca/OpenAI checks require the relevant local environment variables and account access.
 
 ## Next Priorities
 
 1. Expand deterministic backend coverage and cautiously extract pure helpers.
-2. Add holiday-calendar support and clarify paper-option planning limits.
+2. Clarify paper-option planning limits.
 
 ## Safety Rules
 
@@ -56,5 +56,5 @@ Baseline recorded 2026-06-19:
 | 6. Core backend tests | Complete | Added deterministic coverage for symbols, dates, session status, indicators, levels, and safe fallback review. |
 | 7. Frontend smoke checklist | Complete | Added a reusable manual chart, drawing-tool, dashboard, and console checklist. |
 | 8. Pure-helper module split | Complete | Extracted static defaults, market-time helpers, and indicators into focused modules without touching live streams or routes. |
-| 9. Market holiday calendar | Pending | |
+| 9. Market holiday calendar | Complete | Added deterministic common U.S. full-day market holidays to session status. |
 | 10. Option paper-trade wording | Pending | |

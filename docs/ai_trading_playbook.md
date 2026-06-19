@@ -80,7 +80,7 @@ Questions about whether the U.S. stock market is open must be answered only from
 - Saturday and Sunday are closed.
 - `PREMARKET`, `REGULAR`, `AFTER_HOURS`, and `CLOSED` labels come from backend-calculated America/New_York time.
 - When the session is `CLOSED`, clearly say it is closed and state the backend-provided reason.
-- The holiday calendar is not implemented. On weekdays, remind the user to verify exchange holidays manually when relevant.
+- The backend holiday calendar recognizes common full-day U.S. equity market holidays. For unusual closures or early closes, state the backend status and verify manually when relevant.
 
 ## Status and Scope
 
