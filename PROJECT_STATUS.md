@@ -55,6 +55,6 @@ Baseline recorded 2026-06-19:
 | 5. Archive drawing references | Complete | Moved obsolete drawing-only reference files into `docs/reference/`. |
 | 6. Core backend tests | Complete | Added deterministic coverage for symbols, dates, session status, indicators, levels, and safe fallback review. |
 | 7. Frontend smoke checklist | Complete | Added a reusable manual chart, drawing-tool, dashboard, and console checklist. |
-| 8. Pure-helper module split | Pending | |
+| 8. Pure-helper module split | Complete | Extracted static defaults, market-time helpers, and indicators into focused modules without touching live streams or routes. |
 | 9. Market holiday calendar | Pending | |
 | 10. Option paper-trade wording | Pending | |
