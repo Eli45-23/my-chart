@@ -7357,24 +7357,84 @@ def chart_data(timeframe_override=None, include_logging=True, symbol_override=SY
     prev_end = et_datetime(prev_day, 16, 5)
 
     try:
+        def _bar_et_date(bar):
+            """Return the ET date for a bar, handling both normalized and Alpaca-style bars."""
+            raw_ts = None
+            if isinstance(bar, dict):
+                raw_ts = bar.get("timestamp") or bar.get("time") or bar.get("t")
+            else:
+                raw_ts = getattr(bar, "timestamp", None) or getattr(bar, "time", None) or getattr(bar, "t", None)
+
+            if raw_ts is None:
+                return None
+
+            try:
+                if isinstance(raw_ts, (int, float)):
+                    dt = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+                else:
+                    raw_text = str(raw_ts)
+                    if raw_text.endswith("Z"):
+                        raw_text = raw_text[:-1] + "+00:00"
+                    dt = datetime.fromisoformat(raw_text)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(ET).date()
+            except Exception:
+                return None
+
+        def _bars_match_session(bars, session_day):
+            if not bars:
+                return False
+            dates = [_bar_et_date(bar) for bar in bars]
+            dates = [d for d in dates if d is not None]
+            return bool(dates) and any(d == session_day for d in dates)
+
+        def _fetch_regular_session_bars(session_day):
+            session_start = et_datetime(session_day, 9, 30)
+            session_end = et_datetime(session_day, 16, 5)
+            bars = fetch_bars(active_symbol, session_start, session_end, timeframe="1Min")
+            if _bars_match_session(bars, session_day):
+                return bars, session_start, session_end
+            return [], session_start, session_end
+
         today_bars_1min = fetch_bars(active_symbol, today_start, today_end, timeframe="1Min")
         prev_bars_1min = fetch_bars(active_symbol, prev_start, prev_end, timeframe="1Min")
         chart_session_day = day
         chart_session_historical = False
         chart_session_reason = None
 
+        # Closed-market/cache guard:
+        # If the provider returns old cached bars for a request to today's session,
+        # do not treat them as the current session.
+        if not _bars_match_session(today_bars_1min, day):
+            today_bars_1min = []
+
         if not today_bars_1min:
-            chart_session_day = previous_weekday(day)
-            chart_session_historical = chart_session_day != day
-            if chart_session_historical:
-                chart_session_reason = "No current-session candles available; showing the previous trading session."
-                today_start = et_datetime(chart_session_day, 4, 0)
-                today_end = et_datetime(chart_session_day, 20, 0)
-                prior_session_day = previous_weekday(chart_session_day)
-                prev_start = et_datetime(prior_session_day, 9, 30)
-                prev_end = et_datetime(prior_session_day, 16, 5)
-                today_bars_1min = fetch_bars(active_symbol, today_start, today_end, timeframe="1Min")
-                prev_bars_1min = fetch_bars(active_symbol, prev_start, prev_end, timeframe="1Min")
+            # Search backward for the most recent completed regular session with real candles.
+            candidate_day = previous_weekday(day)
+            found_previous_session = False
+
+            for _ in range(10):
+                candidate_bars, candidate_start, candidate_end = _fetch_regular_session_bars(candidate_day)
+                if candidate_bars:
+                    chart_session_day = candidate_day
+                    chart_session_historical = chart_session_day != day
+                    chart_session_reason = "Market closed or no valid current-session candles; showing the most recent completed regular session."
+                    today_start = candidate_start
+                    today_end = candidate_end
+                    today_bars_1min = candidate_bars
+
+                    prior_session_day = previous_weekday(chart_session_day)
+                    prev_start = et_datetime(prior_session_day, 9, 30)
+                    prev_end = et_datetime(prior_session_day, 16, 5)
+                    prev_bars_1min = fetch_bars(active_symbol, prev_start, prev_end, timeframe="1Min")
+                    found_previous_session = True
+                    break
+
+                candidate_day = previous_weekday(candidate_day)
+
+            if not found_previous_session:
+                chart_session_reason = "No current-session or previous regular-session candles were available."
 
         provider_bars = (
             today_bars_1min
