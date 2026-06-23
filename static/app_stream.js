@@ -16,6 +16,11 @@ const symbolInput = document.getElementById("symbolInput");
 const loadSymbolButton = document.getElementById("loadSymbolButton");
 const rebuildChartButton = document.getElementById("rebuildChartButton");
 const paperTradeToggle = document.getElementById("paperTradeToggle");
+const marketGridToggle = document.getElementById("marketGridToggle");
+const marketGridPanel = document.getElementById("marketGridPanel");
+const marketGridCardsEl = document.getElementById("marketGridCards");
+const marketGridRefreshButton = document.getElementById("marketGridRefresh");
+const marketGridCloseButton = document.getElementById("marketGridClose");
 const rebuildBanner = document.getElementById("rebuildBanner");
 const chartTitleEl = document.getElementById("chartTitle");
 const chartSubtitleEl = document.getElementById("chartSubtitle");
@@ -56,6 +61,13 @@ const paperTradeList = document.getElementById("paperTradeList");
 
 const CLEAN_MODE_STORAGE_KEY = "aaplChartCleanMode";
 const PAPER_TRADE_STORAGE_KEY = "paperTradePlannerTrades";
+const MARKET_GRID_STORAGE_KEY = "marketGridLayout";
+const MARKET_GRID_DEFAULTS = [
+  { symbol: "SPY", timeframe: "5Min" },
+  { symbol: "AAPL", timeframe: "5Min" },
+  { symbol: "QQQ", timeframe: "5Min" },
+  { symbol: "AMZN", timeframe: "5Min" },
+];
 let cleanMode = true;
 
 try {
@@ -127,6 +139,8 @@ let aiEntryPriceLine = null;
 let labeledPrices = [];
 let paperTrades = [];
 let paperTradePriceLines = [];
+let marketGridLayout = MARKET_GRID_DEFAULTS.map(card => ({ ...card }));
+const marketGridCharts = new Map();
 
 const CORE_CLEAN_KEY_LEVEL_TYPES = new Set([
   "PMH", "PML", "PDH", "PDL", "HOD", "LOD", "OPEN 5M HIGH", "OPEN 5M LOW",
@@ -164,6 +178,204 @@ function formatChartTimeET(time, showDate = false) {
   const date = chartTimeToDate(time);
   if (Number.isNaN(date.getTime())) return "";
   return showDate ? chartDateEtFormatter.format(date) : chartTimeEtFormatter.format(date);
+}
+
+function loadMarketGridLayout() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(MARKET_GRID_STORAGE_KEY) || "null");
+    if (!Array.isArray(saved) || saved.length !== MARKET_GRID_DEFAULTS.length) return;
+    marketGridLayout = saved.map((card, index) => ({
+      symbol: normalizeSymbolInput(card?.symbol) || MARKET_GRID_DEFAULTS[index].symbol,
+      timeframe: timeframeSeconds[card?.timeframe] ? card.timeframe : MARKET_GRID_DEFAULTS[index].timeframe,
+    }));
+  } catch (_) {
+    marketGridLayout = MARKET_GRID_DEFAULTS.map(card => ({ ...card }));
+  }
+}
+
+function saveMarketGridLayout() {
+  try {
+    localStorage.setItem(MARKET_GRID_STORAGE_KEY, JSON.stringify(marketGridLayout));
+  } catch (_) {
+    // The grid remains usable for this page session if browser storage is unavailable.
+  }
+}
+
+function marketGridOpen() {
+  return Boolean(marketGridPanel && !marketGridPanel.hidden);
+}
+
+function disposeMarketGridCharts() {
+  marketGridCharts.forEach(card => card.chart.remove());
+  marketGridCharts.clear();
+}
+
+function marketGridCardMarkup(card, index) {
+  const timeframeOptions = ["1Min", "5Min", "15Min"].map(timeframe =>
+    `<option value="${timeframe}" ${card.timeframe === timeframe ? "selected" : ""}>${timeframe.replace("Min", "m")}</option>`
+  ).join("");
+  return `
+    <article class="market-grid-card" data-market-grid-card="${index}">
+      <div class="market-grid-card-head">
+        <div class="market-grid-controls">
+          <input class="market-grid-symbol" data-market-grid-symbol="${index}" value="${escapeHtml(card.symbol)}" maxlength="10" aria-label="Grid chart ${index + 1} symbol" />
+          <select class="market-grid-timeframe" data-market-grid-timeframe="${index}" aria-label="Grid chart ${index + 1} timeframe">${timeframeOptions}</select>
+          <button class="market-grid-load" data-market-grid-load="${index}" type="button">Load</button>
+        </div>
+        <button class="market-grid-focus" data-market-grid-focus="${index}" type="button">Focus</button>
+      </div>
+      <div class="market-grid-meta"><span data-market-grid-status="${index}">Loading validated candles...</span><span data-market-grid-price="${index}">--</span></div>
+      <div class="market-grid-chart" data-market-grid-chart="${index}"></div>
+    </article>
+  `;
+}
+
+function createMarketGridChart(index) {
+  const host = marketGridCardsEl?.querySelector(`[data-market-grid-chart="${index}"]`);
+  if (!host || marketGridCharts.has(index)) return;
+  const miniChart = LightweightCharts.createChart(host, {
+    width: host.clientWidth,
+    height: host.clientHeight,
+    layout: { background: { color: "#0b1119" }, textColor: "#8392a4", attributionLogo: false },
+    grid: { vertLines: { color: "#131c28" }, horzLines: { color: "#131c28" } },
+    rightPriceScale: { borderColor: "#28384b", scaleMargins: { top: 0.1, bottom: 0.1 } },
+    timeScale: {
+      borderColor: "#28384b",
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 4,
+      barSpacing: 6,
+      minBarSpacing: 2,
+      tickMarkFormatter: (time, tickMarkType) => formatChartTimeET(time, tickMarkType <= 2),
+    },
+    localization: { timeFormatter: time => formatChartTimeET(time) },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  });
+  const candles = miniChart.addCandlestickSeries({
+    upColor: "#36a99a", downColor: "#d85c5c", borderVisible: true,
+    borderUpColor: "#2b8d83", borderDownColor: "#b84f52",
+    wickUpColor: "#64b9ae", wickDownColor: "#df7470",
+  });
+  const vwap = miniChart.addLineSeries({ color: "#d2aa53", lineWidth: 1, priceLineVisible: false, title: "VWAP" });
+  const ema9 = miniChart.addLineSeries({ color: "#5f91c1", lineWidth: 1, priceLineVisible: false, title: "EMA9" });
+  marketGridCharts.set(index, { chart: miniChart, candles, vwap, ema9, host });
+}
+
+function resizeMarketGridCharts() {
+  marketGridCharts.forEach(card => {
+    if (card.host.clientWidth && card.host.clientHeight) {
+      card.chart.applyOptions({ width: card.host.clientWidth, height: card.host.clientHeight });
+    }
+  });
+}
+
+function updateMarketGridCard(index, data, errorMessage = "") {
+  const status = marketGridCardsEl?.querySelector(`[data-market-grid-status="${index}"]`);
+  const price = marketGridCardsEl?.querySelector(`[data-market-grid-price="${index}"]`);
+  const card = marketGridCharts.get(index);
+  if (!status || !price || !card) return;
+  if (errorMessage) {
+    status.textContent = errorMessage;
+    status.classList.add("market-grid-error");
+    price.textContent = "--";
+    card.candles.setData([]);
+    card.vwap.setData([]);
+    card.ema9.setData([]);
+    return;
+  }
+  const candles = data?.candles || [];
+  card.candles.setData(candles);
+  card.vwap.setData(data?.indicators?.vwap || []);
+  card.ema9.setData(data?.indicators?.ema9 || []);
+  card.chart.timeScale().fitContent();
+  const current = Number(data?.current_price ?? data?.latest_trade?.price ?? candles.at(-1)?.close);
+  price.textContent = Number.isFinite(current) ? current.toFixed(2) : "--";
+  status.textContent = `${data?.data_quality_status || "DEGRADED"} · ${candles.length} candles · ${marketGridLayout[index].timeframe.replace("Min", "m")}`;
+  status.classList.toggle("market-grid-error", data?.data_quality_status === "DEGRADED");
+}
+
+async function loadMarketGridCard(index) {
+  const requested = { ...marketGridLayout[index] };
+  const status = marketGridCardsEl?.querySelector(`[data-market-grid-status="${index}"]`);
+  if (status) {
+    status.textContent = `Loading ${requested.symbol}...`;
+    status.classList.remove("market-grid-error");
+  }
+  try {
+    const response = await fetch(`/api/chart?symbol=${encodeURIComponent(requested.symbol)}&timeframe=${encodeURIComponent(requested.timeframe)}`);
+    const data = await response.json();
+    const current = marketGridLayout[index];
+    if (!current || current.symbol !== requested.symbol || current.timeframe !== requested.timeframe) return;
+    if (!response.ok || data.data_status !== "ok") {
+      throw new Error((data.errors || ["No chart data available."]).join(", "));
+    }
+    updateMarketGridCard(index, data);
+  } catch (error) {
+    updateMarketGridCard(index, null, error.message || "Chart unavailable.");
+  }
+}
+
+function refreshMarketGrid() {
+  if (!marketGridOpen()) return;
+  marketGridLayout.forEach((_, index) => loadMarketGridCard(index));
+}
+
+function focusMarketGridCard(index) {
+  const card = marketGridLayout[index];
+  if (!card) return;
+  activeTimeframe = card.timeframe;
+  tfButtons.forEach(button => button.classList.toggle("active", button.dataset.tf === activeTimeframe));
+  symbolInput.value = card.symbol;
+  loadSelectedSymbol();
+}
+
+function renderMarketGrid() {
+  if (!marketGridOpen() || !marketGridCardsEl) return;
+  disposeMarketGridCharts();
+  marketGridCardsEl.innerHTML = marketGridLayout.map(marketGridCardMarkup).join("");
+  marketGridLayout.forEach((_, index) => {
+    createMarketGridChart(index);
+    const symbolInputEl = marketGridCardsEl.querySelector(`[data-market-grid-symbol="${index}"]`);
+    const timeframeInput = marketGridCardsEl.querySelector(`[data-market-grid-timeframe="${index}"]`);
+    const loadButton = marketGridCardsEl.querySelector(`[data-market-grid-load="${index}"]`);
+    const focusButton = marketGridCardsEl.querySelector(`[data-market-grid-focus="${index}"]`);
+    const applySymbol = () => {
+      const symbol = normalizeSymbolInput(symbolInputEl.value);
+      if (!symbol) {
+        updateMarketGridCard(index, null, "Enter a valid symbol.");
+        symbolInputEl.value = marketGridLayout[index].symbol;
+        return;
+      }
+      marketGridLayout[index].symbol = symbol;
+      symbolInputEl.value = symbol;
+      saveMarketGridLayout();
+      loadMarketGridCard(index);
+    };
+    symbolInputEl.addEventListener("change", applySymbol);
+    symbolInputEl.addEventListener("keydown", event => {
+      if (event.key === "Enter") applySymbol();
+    });
+    loadButton.addEventListener("click", applySymbol);
+    timeframeInput.addEventListener("change", () => {
+      marketGridLayout[index].timeframe = timeframeInput.value;
+      saveMarketGridLayout();
+      loadMarketGridCard(index);
+    });
+    focusButton.addEventListener("click", () => focusMarketGridCard(index));
+  });
+  requestAnimationFrame(() => {
+    resizeMarketGridCharts();
+    refreshMarketGrid();
+  });
+}
+
+function setMarketGridVisible(visible) {
+  if (!marketGridPanel || !marketGridToggle) return;
+  marketGridPanel.hidden = !visible;
+  marketGridToggle.classList.toggle("active", visible);
+  marketGridToggle.setAttribute("aria-pressed", String(visible));
+  if (visible) renderMarketGrid();
+  else disposeMarketGridCharts();
 }
 
 const chart = LightweightCharts.createChart(chartEl, {
@@ -1890,6 +2102,9 @@ tfButtons.forEach((btn) => {
 
 loadSymbolButton.addEventListener("click", loadSelectedSymbol);
 rebuildChartButton?.addEventListener("click", rebuildChartData);
+marketGridToggle?.addEventListener("click", () => setMarketGridVisible(!marketGridOpen()));
+marketGridCloseButton?.addEventListener("click", () => setMarketGridVisible(false));
+marketGridRefreshButton?.addEventListener("click", refreshMarketGrid);
 paperTradeToggle?.addEventListener("click", () => {
   const visible = !paperTradePanel?.classList.contains("visible");
   paperTradePanel?.classList.toggle("visible", visible);
@@ -2018,6 +2233,7 @@ candleCompareClose.addEventListener("click", closeCandleCompare);
 
 window.addEventListener("resize", () => {
   chart.applyOptions({ width: chartEl.clientWidth });
+  resizeMarketGridCharts();
   scheduleChartOverlays();
 });
 
@@ -2027,6 +2243,7 @@ chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
 
 setInterval(updateCountdown, 1000);
 setInterval(refreshAiEntryMarker, 30000);
+setInterval(refreshMarketGrid, 30000);
 
 // Refresh static levels and indicators every 30 seconds.
 // Live candle movement comes from the stream.
@@ -2054,6 +2271,7 @@ setInterval(() => {
 }, 30000);
 
 loadPaperTrades();
+loadMarketGridLayout();
 updateCleanModeControl();
 updateSymbolUi();
 renderPaperTradePlanner();

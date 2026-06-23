@@ -30,6 +30,7 @@ The main page gives a live intraday chart with:
 
 - stock/ETF symbol input
 - 1-minute, 5-minute, and 15-minute timeframes
+- four-chart Market Grid with independent symbols and timeframes
 - live Alpaca stream updates
 - validated candle display
 - VWAP
@@ -223,6 +224,12 @@ The frontend displays them as:
 ```text
 1m / 5m / 15m
 ```
+
+### Market Grid
+
+Use **Market Grid** in the chart header to open a full-screen four-chart workspace. The viewport is divided evenly into a 2×2 layout. The default workspace is `SPY`, `AAPL`, `QQQ`, and `AMZN`, all on `5m`, but each card accepts any valid stock or ETF symbol and its own `1m`, `5m`, or `15m` timeframe.
+
+Each card displays validated candles with VWAP and EMA9 using the existing `/api/chart` route. Grid preferences are saved only in browser `localStorage`; the grid is read-only and a card can be opened in the full detailed chart with **Focus**.
 
 ### Candle Accuracy
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <title>Eli's Live Trading Review</title>
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
-  <link rel="stylesheet" href="/static/chart.css?v=chart1" />
+  <link rel="stylesheet" href="/static/chart.css?v=chart2" />
 </head>
 <body>
   <div class="header">
@@ -16,6 +16,7 @@
       <div class="symbol-group">
         <input class="symbol-input" id="symbolInput" type="text" value="AAPL" placeholder="Symbol" maxlength="10" aria-label="Chart symbol" />
         <button class="symbol-load-btn" id="loadSymbolButton" type="button">Load</button>
+        <button class="symbol-load-btn" id="marketGridToggle" type="button" aria-pressed="false">Market Grid</button>
         <button class="symbol-load-btn" id="rebuildChartButton" type="button">Rebuild Chart Data</button>
         <button class="symbol-load-btn" id="paperTradeToggle" type="button" aria-pressed="false">Paper Trade</button>
       </div>
@@ -56,6 +57,20 @@
     <button class="toggle-btn audit-btn" id="lineAuditToggle" type="button" aria-pressed="false">Line Audit</button>
     <button class="toggle-btn" id="candleCompareToggle" type="button" aria-pressed="false">Candle Compare</button>
   </div>
+
+  <section id="marketGridPanel" class="market-grid-panel" aria-label="Multi-chart market grid" hidden>
+    <div class="market-grid-head">
+      <div>
+        <div class="market-grid-title">Market Grid</div>
+        <div class="market-grid-subtitle">Four validated, read-only chart views. Each card has its own symbol and timeframe.</div>
+      </div>
+      <div class="market-grid-actions">
+        <button class="toggle-btn" id="marketGridRefresh" type="button">Refresh Grid</button>
+        <button class="audit-close" id="marketGridClose" type="button" aria-label="Close Market Grid">Close</button>
+      </div>
+    </div>
+    <div id="marketGridCards" class="market-grid-cards"></div>
+  </section>
 
   <div class="chart-shell">
     <div id="chart"></div>
@@ -143,7 +158,7 @@
   </div>
   <div class="error" id="error"></div>
 
-  <script src="/app_stream.js?v=stream49"></script>
+  <script src="/app_stream.js?v=stream50"></script>
   <script src="/static/drawing_tools.js?v=draw4"></script>
 </body>
 </html>

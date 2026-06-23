@@ -3,7 +3,7 @@
 ## Overall
 
 - Completion estimate: 100%
-- Last updated: 2026-06-19
+- Last updated: 2026-06-23
 - Application: local read-only chart and trading-review dashboard at `http://127.0.0.1:8900/`
 
 ## Completed Features
@@ -13,6 +13,7 @@
 - Core levels, support/resistance, supply/demand, strict FVGs, Clean Mode, and Line Audit
 - Read-only AI review, deterministic marker gates, Candle Compare, and performance dashboard
 - Local-only paper trade planner and editable chart drawing tools
+- Read-only four-chart Market Grid with independent symbols/timeframes and browser-local preferences
 
 ## Known Issues / Manual Review
 
@@ -34,7 +35,7 @@
 
 ## Last Checks
 
-Final verification recorded 2026-06-19:
+Latest verification recorded 2026-06-23:
 
 - `python3 -m py_compile server_stream.py`: passed
 - `python3 -m compileall -q .`: passed
@@ -59,3 +60,4 @@ Final verification recorded 2026-06-19:
 | 9. Market holiday calendar | Complete | Added deterministic common U.S. full-day market holidays to session status. |
 | 10. Option paper-trade wording | Complete | Clarified premium-based option planning, manual tracking, delta context, and the difference from stock-chart levels. |
 | Final verification | Complete | Syntax, compile, deterministic tests, and local chart/dashboard responses passed. |
+| Market Grid | Complete | Added four compact validated chart cards with independent symbols/timeframes and a full-chart focus action. |
