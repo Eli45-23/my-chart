@@ -61,5 +61,5 @@ Latest verification recorded 2026-06-23:
 | 9. Market holiday calendar | Complete | Added deterministic common U.S. full-day market holidays to session status. |
 | 10. Option paper-trade wording | Complete | Clarified premium-based option planning, manual tracking, delta context, and the difference from stock-chart levels. |
 | Final verification | Complete | Syntax, compile, deterministic tests, and local chart/dashboard responses passed. |
-| Market Grid | Complete | Added four compact validated chart cards with independent symbols/timeframes and a full-chart focus action. |
+| Market Grid | Complete | Added four live validated chart cards with independent symbols/timeframes, grid-specific layer controls, optional Clean Mode, and a full-chart focus action. |
 | SPX Index Fallback | Complete | Added explicit display-only SPX index support with no AI, marker, setup, or live-Alpaca authority. |

@@ -69,6 +69,24 @@
         <button class="audit-close" id="marketGridClose" type="button" aria-label="Close Market Grid">Close</button>
       </div>
     </div>
+    <div class="market-grid-layer-row" aria-label="Market Grid layer controls">
+      <button class="toggle-btn clean-mode-btn active" id="marketGridCleanModeToggle" type="button" aria-pressed="true">Clean Mode: On</button>
+      <span class="toggle-label">Core</span>
+      <button class="toggle-btn active" data-market-grid-layer="premarket">PMH/PML</button>
+      <button class="toggle-btn active" data-market-grid-layer="previousDay">PDH/PDL/PDC</button>
+      <button class="toggle-btn active" data-market-grid-layer="vwap">VWAP</button>
+      <button class="toggle-btn active" data-market-grid-layer="emas">EMA9/EMA20</button>
+      <span class="toggle-label">Structure</span>
+      <button class="toggle-btn active" data-market-grid-layer="sr">Support/Resistance</button>
+      <button class="toggle-btn active" data-market-grid-layer="supplyDemand">Supply/Demand</button>
+      <button class="toggle-btn active" data-market-grid-layer="fvg">FVGs</button>
+      <button class="toggle-btn" data-market-grid-layer="weakZones">Weak/Failed</button>
+      <button class="toggle-btn active" data-market-grid-layer="liquiditySweeps">Liquidity Sweeps</button>
+      <button class="toggle-btn active" data-market-grid-layer="clusters">Clusters</button>
+      <button class="toggle-btn active" data-market-grid-layer="reactionZones">Reaction Zones</button>
+      <span class="toggle-label">Setups</span>
+      <button class="toggle-btn active" data-market-grid-layer="confirmationSetups">Confirmation Setups</button>
+    </div>
     <div id="marketGridCards" class="market-grid-cards"></div>
   </section>
 
@@ -158,7 +176,7 @@
   </div>
   <div class="error" id="error"></div>
 
-  <script src="/app_stream.js?v=stream51"></script>
+  <script src="/app_stream.js?v=stream54"></script>
   <script src="/static/drawing_tools.js?v=draw4"></script>
 </body>
 </html>

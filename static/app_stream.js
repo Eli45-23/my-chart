@@ -21,6 +21,8 @@ const marketGridPanel = document.getElementById("marketGridPanel");
 const marketGridCardsEl = document.getElementById("marketGridCards");
 const marketGridRefreshButton = document.getElementById("marketGridRefresh");
 const marketGridCloseButton = document.getElementById("marketGridClose");
+const marketGridCleanModeToggle = document.getElementById("marketGridCleanModeToggle");
+const marketGridLayerButtons = document.querySelectorAll(".toggle-btn[data-market-grid-layer]");
 const rebuildBanner = document.getElementById("rebuildBanner");
 const chartTitleEl = document.getElementById("chartTitle");
 const chartSubtitleEl = document.getElementById("chartSubtitle");
@@ -62,6 +64,7 @@ const paperTradeList = document.getElementById("paperTradeList");
 const CLEAN_MODE_STORAGE_KEY = "aaplChartCleanMode";
 const PAPER_TRADE_STORAGE_KEY = "paperTradePlannerTrades";
 const MARKET_GRID_STORAGE_KEY = "marketGridLayout";
+const MARKET_GRID_SETTINGS_STORAGE_KEY = "marketGridLayerSettings";
 const MARKET_GRID_DEFAULTS = [
   { symbol: "SPY", timeframe: "5Min" },
   { symbol: "AAPL", timeframe: "5Min" },
@@ -78,6 +81,21 @@ try {
 }
 
 const layerState = {
+  premarket: true,
+  previousDay: true,
+  vwap: true,
+  emas: true,
+  sr: true,
+  supplyDemand: true,
+  fvg: true,
+  weakZones: false,
+  liquiditySweeps: true,
+  clusters: true,
+  reactionZones: true,
+  confirmationSetups: true,
+};
+
+const MARKET_GRID_LAYER_DEFAULTS = {
   premarket: true,
   previousDay: true,
   vwap: true,
@@ -140,9 +158,14 @@ let labeledPrices = [];
 let paperTrades = [];
 let paperTradePriceLines = [];
 let marketGridLayout = MARKET_GRID_DEFAULTS.map(card => ({ ...card }));
+let marketGridCleanMode = true;
+let marketGridLayerState = { ...MARKET_GRID_LAYER_DEFAULTS };
 const marketGridCharts = new Map();
 
 const CORE_CLEAN_KEY_LEVEL_TYPES = new Set([
+  "PMH", "PML", "PDH", "PDL", "HOD", "LOD", "OPEN 5M HIGH", "OPEN 5M LOW",
+]);
+const GRID_CORE_LEVEL_TYPES = new Set([
   "PMH", "PML", "PDH", "PDL", "HOD", "LOD", "OPEN 5M HIGH", "OPEN 5M LOW",
 ]);
 
@@ -199,6 +222,73 @@ function saveMarketGridLayout() {
   } catch (_) {
     // The grid remains usable for this page session if browser storage is unavailable.
   }
+}
+
+function loadMarketGridSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(MARKET_GRID_SETTINGS_STORAGE_KEY) || "null");
+    if (!saved || typeof saved !== "object") return;
+    marketGridCleanMode = saved.cleanMode !== false;
+    marketGridLayerState = {
+      ...MARKET_GRID_LAYER_DEFAULTS,
+      ...(saved.layers && typeof saved.layers === "object" ? saved.layers : {}),
+    };
+  } catch (_) {
+    marketGridCleanMode = true;
+    marketGridLayerState = { ...MARKET_GRID_LAYER_DEFAULTS };
+  }
+}
+
+function saveMarketGridSettings() {
+  try {
+    localStorage.setItem(MARKET_GRID_SETTINGS_STORAGE_KEY, JSON.stringify({
+      cleanMode: marketGridCleanMode,
+      layers: marketGridLayerState,
+    }));
+  } catch (_) {
+    // The grid remains usable for this page session if browser storage is unavailable.
+  }
+}
+
+function gridLayerVisible(layer) {
+  if (!marketGridLayerState[layer]) return false;
+  return !marketGridCleanMode || ![
+    "vwap", "emas", "weakZones", "liquiditySweeps", "clusters", "reactionZones", "confirmationSetups",
+  ].includes(layer);
+}
+
+function marketGridModeLabel() {
+  return marketGridCleanMode ? "CLEAN MODE" : "FULL MODE";
+}
+
+function updateMarketGridControls() {
+  if (marketGridCleanModeToggle) {
+    marketGridCleanModeToggle.textContent = `Clean Mode: ${marketGridCleanMode ? "On" : "Off"}`;
+    marketGridCleanModeToggle.classList.toggle("active", marketGridCleanMode);
+    marketGridCleanModeToggle.setAttribute("aria-pressed", String(marketGridCleanMode));
+  }
+  marketGridLayerButtons.forEach(button => {
+    const layer = button.dataset.marketGridLayer;
+    const enabled = Boolean(marketGridLayerState[layer]);
+    button.classList.toggle("active", enabled);
+    button.classList.toggle("clean-mode-suppressed", enabled && !gridLayerVisible(layer));
+    button.setAttribute("aria-pressed", String(enabled));
+  });
+}
+
+function applyMarketGridIndicatorVisibility(card) {
+  if (!card) return;
+  card.vwap.applyOptions({ visible: gridLayerVisible("vwap") });
+  card.ema9.applyOptions({ visible: gridLayerVisible("emas") });
+  card.ema20.applyOptions({ visible: gridLayerVisible("emas") });
+}
+
+function redrawMarketGridLayers() {
+  updateMarketGridControls();
+  marketGridCharts.forEach((card, index) => {
+    applyMarketGridIndicatorVisibility(card);
+    if (card.data) renderMarketGridStructure(index, card.data);
+  });
 }
 
 function marketGridOpen() {
@@ -259,9 +349,12 @@ function createMarketGridChart(index) {
     borderUpColor: "#2b8d83", borderDownColor: "#b84f52",
     wickUpColor: "#64b9ae", wickDownColor: "#df7470",
   });
-  const vwap = miniChart.addLineSeries({ color: "#d2aa53", lineWidth: 1, priceLineVisible: false, title: "VWAP" });
-  const ema9 = miniChart.addLineSeries({ color: "#5f91c1", lineWidth: 1, priceLineVisible: false, title: "EMA9" });
-  marketGridCharts.set(index, { chart: miniChart, candles, vwap, ema9, host, eventSource: null, streamKey: null, quality: null });
+  const vwap = miniChart.addLineSeries({ color: "#d2aa53", lineWidth: 1, priceLineVisible: false, title: "VWAP", visible: false });
+  const ema9 = miniChart.addLineSeries({ color: "#5f91c1", lineWidth: 1, priceLineVisible: false, title: "EMA9", visible: false });
+  const ema20 = miniChart.addLineSeries({ color: "#8a719f", lineWidth: 1, priceLineVisible: false, title: "EMA20", visible: false });
+  const card = { chart: miniChart, candles, vwap, ema9, ema20, host, priceLines: [], eventSource: null, streamKey: null, quality: null, data: null };
+  marketGridCharts.set(index, card);
+  applyMarketGridIndicatorVisibility(card);
 }
 
 function resizeMarketGridCharts() {
@@ -287,15 +380,191 @@ function updateMarketGridCard(index, data, errorMessage = "") {
     return;
   }
   const candles = data?.candles || [];
+  card.data = data;
   card.candles.setData(candles);
   card.vwap.setData(data?.indicators?.vwap || []);
   card.ema9.setData(data?.indicators?.ema9 || []);
+  card.ema20.setData(data?.indicators?.ema20 || []);
+  renderMarketGridStructure(index, data);
   card.chart.timeScale().fitContent();
   const current = Number(data?.current_price ?? data?.latest_trade?.price ?? candles.at(-1)?.close);
   price.textContent = Number.isFinite(current) ? current.toFixed(2) : "--";
-  status.textContent = `${data?.data_quality_status || "DEGRADED"} · ${candles.length} candles · ${marketGridLayout[index].timeframe.replace("Min", "m")}`;
+  status.textContent = `${marketGridModeLabel()} · ${data?.data_quality_status || "DEGRADED"} · ${candles.length} candles · ${marketGridLayout[index].timeframe.replace("Min", "m")}`;
   status.classList.toggle("market-grid-error", data?.data_quality_status === "DEGRADED");
   card.quality = data?.data_quality_status || "DEGRADED";
+}
+
+function clearMarketGridPriceLines(card) {
+  for (const line of card?.priceLines || []) card.candles.removePriceLine(line);
+  if (card) card.priceLines = [];
+}
+
+function addMarketGridPriceLine(card, label, price, color, style = LightweightCharts.LineStyle.Dashed, showLabel = true) {
+  const numeric = Number(price);
+  if (!card || !Number.isFinite(numeric)) return;
+  card.priceLines.push(card.candles.createPriceLine({
+    price: numeric,
+    color,
+    lineWidth: 1,
+    lineStyle: style,
+    axisLabelVisible: showLabel,
+    title: showLabel ? label : "",
+  }));
+}
+
+function addMarketGridRange(card, label, item, color, style = LightweightCharts.LineStyle.Dashed) {
+  const low = Number(item?.low);
+  const high = Number(item?.high);
+  if (Number.isFinite(low) && Number.isFinite(high)) {
+    addMarketGridPriceLine(card, "", high, color, LightweightCharts.LineStyle.Dotted, false);
+    addMarketGridPriceLine(card, "", low, color, LightweightCharts.LineStyle.Dotted, false);
+    addMarketGridPriceLine(card, label, (low + high) / 2, color, style);
+    return;
+  }
+  addMarketGridPriceLine(card, label, item?.price, color, style);
+}
+
+function selectGridNearestLevels(levels, currentPrice, side) {
+  const current = Number(currentPrice);
+  const gradeRank = grade => ({ A: 0, B: 1, C: 2, WEAK: 3 }[grade] ?? 2);
+  return (levels || [])
+    .filter(level => Number.isFinite(Number(level?.price)))
+    .filter(level => !Number.isFinite(current) || (side === "support" ? Number(level.price) <= current : Number(level.price) >= current))
+    .sort((left, right) =>
+      Math.abs(Number(left.price) - current) - Math.abs(Number(right.price) - current) ||
+      gradeRank(left.quality_grade) - gradeRank(right.quality_grade) ||
+      Number(right.quality_score || 0) - Number(left.quality_score || 0)
+    )
+    .slice(0, 2);
+}
+
+function selectGridNearestZone(zones, currentPrice, side) {
+  const current = Number(currentPrice);
+  const gradeRank = grade => ({ A: 0, B: 1, C: 2, WEAK: 3 }[grade] ?? 2);
+  return (zones || [])
+    .filter(zone => Number.isFinite(Number(zone?.low)) && Number.isFinite(Number(zone?.high)))
+    .filter(zone => zone.reaction_status !== "FAILED" || (Number.isFinite(current) && Math.abs((side === "demand" ? Number(zone.high) : Number(zone.low)) - current) / current < 0.003))
+    .sort((left, right) => {
+      const leftAnchor = side === "demand" ? Number(left.high) : Number(left.low);
+      const rightAnchor = side === "demand" ? Number(right.high) : Number(right.low);
+      return Math.abs(leftAnchor - current) - Math.abs(rightAnchor - current) ||
+        gradeRank(left.zone_quality_grade) - gradeRank(right.zone_quality_grade) ||
+        Number(right.zone_quality_score || 0) - Number(left.zone_quality_score || 0);
+    })[0] || null;
+}
+
+function renderMarketGridStructure(index, data) {
+  const card = marketGridCharts.get(index);
+  if (!card) return;
+  clearMarketGridPriceLines(card);
+  if (data?.display_only_index) return;
+
+  const levels = data?.levels || {};
+  const current = Number(data?.current_price ?? data?.latest_trade?.price ?? data?.candles?.at(-1)?.close);
+  const lineColors = {
+    PMH: COLORS.pmhPml, PML: COLORS.pmhPml,
+    PDH: COLORS.previousHighLow, PDL: COLORS.previousHighLow,
+    HOD: COLORS.hodLod, LOD: COLORS.hodLod,
+    "OPEN 5M HIGH": COLORS.openingRange, "OPEN 5M LOW": COLORS.openingRange,
+  };
+  const levelMap = {
+    PMH: levels.pmh, PML: levels.pml, PDH: levels.pdh, PDL: levels.pdl,
+    HOD: levels.hod, LOD: levels.lod,
+    "OPEN 5M HIGH": levels.opening_5m_high, "OPEN 5M LOW": levels.opening_5m_low,
+  };
+  const showCore = type => (
+    ["PMH", "PML"].includes(type) ? gridLayerVisible("premarket") : gridLayerVisible("previousDay")
+  );
+  GRID_CORE_LEVEL_TYPES.forEach(type => {
+    if (showCore(type)) addMarketGridPriceLine(card, type, levelMap[type], lineColors[type], LightweightCharts.LineStyle.Dashed);
+  });
+  if (gridLayerVisible("previousDay")) {
+    addMarketGridPriceLine(card, "PDC", levels.pdc, COLORS.previousClose, LightweightCharts.LineStyle.Dotted);
+  }
+
+  const supportResistance = data?.support_resistance || {};
+  const cleanLevels = side => selectGridNearestLevels(supportResistance[side], current, side);
+  const fullLevels = side => (supportResistance[side] || []).filter(level =>
+    marketGridLayerState.weakZones || level.quality_grade !== "WEAK"
+  ).slice(0, 8);
+  const selectedResistance = marketGridCleanMode ? cleanLevels("resistance") : fullLevels("resistance");
+  const selectedSupport = marketGridCleanMode ? cleanLevels("support") : fullLevels("support");
+  if (gridLayerVisible("sr")) selectedResistance.forEach(level => {
+    addMarketGridPriceLine(card, level.quality_grade === "WEAK" ? "WEAK RESISTANCE" : "RESISTANCE", level.price, level.quality_grade === "WEAK" ? COLORS.weakResistance : COLORS.resistance);
+  });
+  if (gridLayerVisible("sr")) selectedSupport.forEach(level => {
+    addMarketGridPriceLine(card, level.quality_grade === "WEAK" ? "WEAK SUPPORT" : "SUPPORT", level.price, level.quality_grade === "WEAK" ? COLORS.weakSupport : COLORS.support);
+  });
+
+  const supplyDemand = data?.supply_demand || {};
+  [["demand", "DEMAND", COLORS.demand], ["supply", "SUPPLY", COLORS.supply]].forEach(([side, label, color]) => {
+    const zones = marketGridCleanMode
+      ? [selectGridNearestZone(supplyDemand[side], current, side)].filter(Boolean)
+      : (supplyDemand[side] || []).filter(zone => marketGridLayerState.weakZones || (!isWeakZone(zone) && zone.reaction_status !== "FAILED")).slice(0, 4);
+    if (!gridLayerVisible("supplyDemand")) return;
+    zones.forEach(zone => {
+    const weak = isWeakZone(zone);
+    const zoneLabel = `${weak ? "WEAK " : ""}${label}`;
+    const zoneColor = weak ? (side === "demand" ? COLORS.weakDemand : COLORS.weakSupply) : color;
+    addMarketGridPriceLine(card, zoneLabel, (Number(zone.low) + Number(zone.high)) / 2, zoneColor, LightweightCharts.LineStyle.Solid);
+    addMarketGridPriceLine(card, "", zone.low, zoneColor, LightweightCharts.LineStyle.Dotted, false);
+    addMarketGridPriceLine(card, "", zone.high, zoneColor, LightweightCharts.LineStyle.Dotted, false);
+    });
+  });
+
+  const gaps = [
+    ...((data?.fair_value_gaps || {}).bullish || []),
+    ...((data?.fair_value_gaps || {}).bearish || []),
+  ].filter(gap => marketGridCleanMode
+    ? gap.visible_in_clean_mode && gap.worth_showing && ["ACTIVE", "PARTIALLY_FILLED"].includes(gap.status) && gap.quality_grade !== "WEAK" && (gap.quality_grade !== "C" || (gap.price_interacting_now && gap.has_key_confluence))
+    : marketGridLayerState.weakZones || (gap.quality_grade !== "WEAK" && !["FILLED", "INVALID"].includes(gap.status))
+  );
+  if (gridLayerVisible("fvg")) gaps.slice(0, marketGridCleanMode ? 2 : 6).forEach(gap => {
+    const bearish = gap.type === "BEARISH_FVG";
+    const color = bearish ? COLORS.bearFvg : COLORS.bullFvg;
+    addMarketGridPriceLine(card, bearish ? "BEAR FVG" : "BULL FVG", gap.midpoint, color, LightweightCharts.LineStyle.Dashed);
+    addMarketGridPriceLine(card, "", gap.bottom, color, LightweightCharts.LineStyle.Dotted, false);
+    addMarketGridPriceLine(card, "", gap.top, color, LightweightCharts.LineStyle.Dotted, false);
+  });
+
+  if (gridLayerVisible("liquiditySweeps")) {
+    const sweeps = data?.liquidity_sweeps || {};
+    (sweeps.upside || []).slice(0, 4).forEach((zone, index) => {
+      addMarketGridRange(card, `UP SWEEP ${index + 1}`, zone, COLORS.liquiditySweep);
+    });
+    (sweeps.downside || []).slice(0, 4).forEach((zone, index) => {
+      addMarketGridRange(card, `DOWN SWEEP ${index + 1}`, zone, COLORS.liquiditySweepAlt);
+    });
+  }
+
+  if (gridLayerVisible("clusters")) {
+    (data?.level_clusters?.clusters || []).slice(0, 5).forEach((cluster, index) => {
+      const color = cluster.kind === "upside" ? COLORS.upsideCluster : COLORS.downsideCluster;
+      addMarketGridRange(card, `${cluster.kind === "upside" ? "UP" : "DOWN"} CLUSTER ${index + 1}`, cluster, color, LightweightCharts.LineStyle.Solid);
+    });
+  }
+
+  if (gridLayerVisible("reactionZones")) {
+    const reactions = data?.structure_reactions || {};
+    (reactions.resistance_watch || []).slice(0, 3).forEach((zone, index) => {
+      addMarketGridRange(card, `WATCH R${index + 1}`, zone, COLORS.resistanceWatch);
+    });
+    (reactions.support_watch || []).slice(0, 3).forEach((zone, index) => {
+      addMarketGridRange(card, `WATCH S${index + 1}`, zone, COLORS.supportWatch);
+    });
+  }
+
+  if (gridLayerVisible("confirmationSetups")) {
+    (data?.confirmation_setups?.setups || []).slice(0, 4).forEach(setup => {
+      const stage = setup.confirmation_stage || setup.status || "WATCH";
+      const direction = String(setup.direction || "").toUpperCase();
+      const color = stage === "CONFIRMED" ? COLORS.confirmationConfirmed
+        : (stage === "FAILED" || setup.status === "INVALIDATED") ? COLORS.confirmationInvalid
+        : COLORS.confirmationWatch;
+      addMarketGridPriceLine(card, `${stage === "EARLY_CONFIRM" ? "EARLY" : stage} ${direction}`.trim(), setup.trigger ?? setup.level_price, color,
+        stage === "CONFIRMED" ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dashed);
+    });
+  }
 }
 
 function closeMarketGridCardStream(card) {
@@ -326,7 +595,7 @@ function connectMarketGridCardStream(index, requested) {
 
   source.onopen = () => {
     if (marketGridCharts.get(index)?.eventSource !== source) return;
-    updateMarketGridLiveStatus(index, `${card.quality || "VALIDATED"} · LIVE ${requested.timeframe.replace("Min", "m")}`);
+    updateMarketGridLiveStatus(index, `${marketGridModeLabel()} · ${card.quality || "VALIDATED"} · LIVE ${requested.timeframe.replace("Min", "m")}`);
   };
   source.onmessage = event => {
     let data;
@@ -342,13 +611,13 @@ function connectMarketGridCardStream(index, requested) {
       card.candles.update(data.candle);
       const latest = Number(data.latest_trade?.price ?? data.candle.close);
       if (price && Number.isFinite(latest)) price.textContent = latest.toFixed(2);
-      updateMarketGridLiveStatus(index, `${card.quality || "VALIDATED"} · LIVE ${requested.timeframe.replace("Min", "m")}`);
+      updateMarketGridLiveStatus(index, `${marketGridModeLabel()} · ${card.quality || "VALIDATED"} · LIVE ${requested.timeframe.replace("Min", "m")}`);
     } else if (data.type === "heartbeat") {
       const latest = Number(data.latest_trade?.price);
       if (price && Number.isFinite(latest)) price.textContent = latest.toFixed(2);
     } else if (data.type === "data_quality_warning") {
       card.quality = data.data_quality_status || "WARNING";
-      updateMarketGridLiveStatus(index, `${card.quality} · live candle withheld`, card.quality === "DEGRADED");
+      updateMarketGridLiveStatus(index, `${marketGridModeLabel()} · ${card.quality} · live candle withheld`, card.quality === "DEGRADED");
     }
   };
   source.onerror = () => {
@@ -2187,6 +2456,20 @@ rebuildChartButton?.addEventListener("click", rebuildChartData);
 marketGridToggle?.addEventListener("click", () => setMarketGridVisible(!marketGridOpen()));
 marketGridCloseButton?.addEventListener("click", () => setMarketGridVisible(false));
 marketGridRefreshButton?.addEventListener("click", refreshMarketGrid);
+marketGridCleanModeToggle?.addEventListener("click", () => {
+  marketGridCleanMode = !marketGridCleanMode;
+  saveMarketGridSettings();
+  redrawMarketGridLayers();
+});
+marketGridLayerButtons.forEach(button => {
+  button.addEventListener("click", () => {
+    const layer = button.dataset.marketGridLayer;
+    if (!layer) return;
+    marketGridLayerState[layer] = !marketGridLayerState[layer];
+    saveMarketGridSettings();
+    redrawMarketGridLayers();
+  });
+});
 paperTradeToggle?.addEventListener("click", () => {
   const visible = !paperTradePanel?.classList.contains("visible");
   paperTradePanel?.classList.toggle("visible", visible);
@@ -2354,7 +2637,9 @@ setInterval(() => {
 
 loadPaperTrades();
 loadMarketGridLayout();
+loadMarketGridSettings();
 updateCleanModeControl();
+updateMarketGridControls();
 updateSymbolUi();
 renderPaperTradePlanner();
 reloadForTimeframe();

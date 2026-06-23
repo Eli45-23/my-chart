@@ -229,7 +229,7 @@ The frontend displays them as:
 
 Use **Market Grid** in the chart header to open a full-screen four-chart workspace. The viewport is divided evenly into a 2×2 layout. The default workspace is `SPY`, `AAPL`, `QQQ`, and `AMZN`, all on `5m`, but each card accepts any valid stock or ETF symbol and its own `1m`, `5m`, or `15m` timeframe.
 
-Each card displays validated candles with VWAP and EMA9 using the existing `/api/chart` route. Grid preferences are saved only in browser `localStorage`; the grid is read-only and a card can be opened in the full detailed chart with **Focus**.
+The grid has its own layer toolbar and optional **Clean Mode**, independent of the main chart. Clean Mode keeps validated candles, core levels, nearest support/resistance, nearest supply/demand, and eligible active FVG context. Turn Clean Mode off to enable selected VWAP/EMA, sweeps, clusters, reactions, setup context, and broader audited structures. Grid preferences are saved only in browser `localStorage`; the grid is read-only and a card can be opened in the full detailed chart with **Focus** for drawings, paper planning, Line Audit, Candle Compare, and AI review.
 
 `SPX` is supported as a display-only S&P 500 index chart using the `^GSPC` external index feed because standard Alpaca stock bars do not include the index. It refreshes every 30 seconds, is clearly labeled as an external source, and does not enable live Alpaca streaming, AI review, setup logging, or entry markers.
 

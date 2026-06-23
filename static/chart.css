@@ -574,6 +574,18 @@
     .market-grid-title { font-size: 13px; font-weight: 800; letter-spacing: -.01em; }
     .market-grid-subtitle { margin-top: 2px; color: var(--muted); font-size: 10px; }
     .market-grid-actions { display: flex; align-items: center; gap: 8px; }
+    .market-grid-layer-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px;
+      margin: 0 2px 9px;
+      padding: 6px 7px;
+      border: 1px solid #202d3d;
+      border-radius: 8px;
+      background: rgba(11, 17, 25, .78);
+    }
+    .market-grid-layer-row .toggle-label { margin-left: 5px; }
     .market-grid-cards {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
