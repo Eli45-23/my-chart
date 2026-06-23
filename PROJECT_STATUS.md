@@ -14,6 +14,7 @@
 - Read-only AI review, deterministic marker gates, Candle Compare, and performance dashboard
 - Local-only paper trade planner and editable chart drawing tools
 - Read-only four-chart Market Grid with independent symbols/timeframes and browser-local preferences
+- Display-only `SPX` fallback from an external S&P 500 index feed when Alpaca index data is unavailable
 
 ## Known Issues / Manual Review
 
@@ -61,3 +62,4 @@ Latest verification recorded 2026-06-23:
 | 10. Option paper-trade wording | Complete | Clarified premium-based option planning, manual tracking, delta context, and the difference from stock-chart levels. |
 | Final verification | Complete | Syntax, compile, deterministic tests, and local chart/dashboard responses passed. |
 | Market Grid | Complete | Added four compact validated chart cards with independent symbols/timeframes and a full-chart focus action. |
+| SPX Index Fallback | Complete | Added explicit display-only SPX index support with no AI, marker, setup, or live-Alpaca authority. |

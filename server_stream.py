@@ -25,6 +25,13 @@ ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY
 DATA_BASE_URL = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets")
 TRADING_BASE_URL = os.getenv("ALPACA_TRADING_BASE_URL") or os.getenv("APCA_API_BASE_URL") or "https://api.alpaca.markets"
 FEED = os.getenv("ALPACA_STOCK_FEED", "sip").lower()
+EXTERNAL_INDEX_SYMBOLS = {
+    "SPX": {
+        "provider_symbol": "^GSPC",
+        "label": "S&P 500 Index",
+        "provider": "Yahoo Finance index feed",
+    },
+}
 
 
 subscribers = {}
@@ -262,6 +269,50 @@ def fetch_bars(symbol, start, end, timeframe="1Min", limit=10000):
     response = requests.get(url, headers=get_headers(), params=params, timeout=20)
     response.raise_for_status()
     return response.json().get("bars") or []
+
+
+def is_external_index_symbol(symbol):
+    return normalize_symbol(symbol) in EXTERNAL_INDEX_SYMBOLS
+
+
+def fetch_external_index_bars(symbol, start, end):
+    """Fetch read-only one-minute index candles from the configured external index mapping."""
+    symbol = normalize_symbol(symbol)
+    index_config = EXTERNAL_INDEX_SYMBOLS.get(symbol)
+    if not index_config:
+        return []
+
+    response = requests.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{index_config['provider_symbol']}",
+        params={
+            "period1": int(start.timestamp()),
+            "period2": int(end.timestamp()),
+            "interval": "1m",
+            "includePrePost": "true",
+        },
+        headers={"User-Agent": "Mozilla/5.0 (compatible; MyChart/1.0)"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    result = ((response.json().get("chart") or {}).get("result") or [None])[0] or {}
+    quote = ((result.get("indicators") or {}).get("quote") or [{}])[0] or {}
+    bars = []
+    for index, timestamp in enumerate(result.get("timestamp") or []):
+        values = {
+            "o": (quote.get("open") or [None])[index] if index < len(quote.get("open") or []) else None,
+            "h": (quote.get("high") or [None])[index] if index < len(quote.get("high") or []) else None,
+            "l": (quote.get("low") or [None])[index] if index < len(quote.get("low") or []) else None,
+            "c": (quote.get("close") or [None])[index] if index < len(quote.get("close") or []) else None,
+            "v": (quote.get("volume") or [0])[index] if index < len(quote.get("volume") or []) else 0,
+        }
+        if not all(isinstance(values[key], (int, float)) and math.isfinite(values[key]) and values[key] > 0 for key in ("o", "h", "l", "c")):
+            continue
+        volume = values["v"] if isinstance(values["v"], (int, float)) and math.isfinite(values["v"]) and values["v"] >= 0 else 0
+        bars.append({
+            "t": datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+            "o": values["o"], "h": values["h"], "l": values["l"], "c": values["c"], "v": volume,
+        })
+    return bars
 
 
 def fetch_alpaca_option_contracts(symbol, expiration=None):
@@ -2188,12 +2239,12 @@ def compare_provider_aggregates(provider_bars, rebuilt, symbol, timeframe):
     return comparisons
 
 
-def build_candle_integrity_bundle(bars_1min, symbol, timeframe, provider_bars=None):
-    raw_1min = raw_candles_from_bars(bars_1min, symbol, "1Min")
-    raw_provider = raw_candles_from_bars(provider_bars or bars_1min, symbol, timeframe)
+def build_candle_integrity_bundle(bars_1min, symbol, timeframe, provider_bars=None, provider="alpaca", skip_provider_comparison=False):
+    raw_1min = raw_candles_from_bars(bars_1min, symbol, "1Min", provider=provider)
+    raw_provider = raw_candles_from_bars(provider_bars or bars_1min, symbol, timeframe, provider=provider)
     audited, validated_1min = validate_raw_candles(raw_1min)
     candles = aggregate_validated_candles(validated_1min, timeframe, audited)
-    comparisons = compare_provider_aggregates(provider_bars or [], candles, symbol, timeframe) if timeframe != "1Min" else []
+    comparisons = compare_provider_aggregates(provider_bars or [], candles, symbol, timeframe) if timeframe != "1Min" and not skip_provider_comparison else []
     suspicious = [item for item in audited if item["validation_status"] == "SUSPICIOUS"]
     rejected = [item for item in audited if item["validation_status"] == "REJECTED"]
     corrected = [item for item in candles if item["validation_status"] == "CORRECTED"]
@@ -7329,11 +7380,106 @@ def app_stream_js():
     return send_from_directory("static", "app_stream.js")
 
 
+def external_index_chart_data(symbol, timeframe):
+    """Return display-only index candles without enabling any trading-analysis workflow."""
+    now = datetime.now(ET)
+    index_config = EXTERNAL_INDEX_SYMBOLS[symbol]
+    try:
+        raw_bars = fetch_external_index_bars(symbol, now - timedelta(days=5), now)
+        integrity = build_candle_integrity_bundle(
+            raw_bars,
+            symbol,
+            timeframe,
+            provider_bars=raw_bars,
+            provider="yahoo_finance_index",
+            skip_provider_comparison=True,
+        )
+        candles = integrity["validated_candles"]
+        current_price = candles[-1]["close"] if candles else None
+        indicators = {
+            "vwap": [],  # Index feed volume is not suitable for VWAP calculations.
+            "ema9": calc_ema(candles, 9),
+            "ema20": calc_ema(candles, 20),
+            "atr14": calc_atr14(candles, 14),
+        }
+        source_warning = (
+            f"{symbol} uses {index_config['provider']} ({index_config['provider_symbol']}) because Alpaca stock bars do not cover this index. "
+            "Display-only index context; no Alpaca live stream, AI review, setup logging, or entry markers."
+        )
+        return jsonify({
+            "symbol": symbol,
+            "active_symbol": symbol,
+            "read_only": True,
+            "timeframe": timeframe,
+            "timestamp": now.isoformat(),
+            "current_price": current_price,
+            "latest_trade": {
+                "symbol": symbol,
+                "price": current_price,
+                "timestamp": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "source": index_config["provider"],
+            } if current_price is not None else None,
+            "stream_status": {
+                "symbol": symbol,
+                "connected": False,
+                "error": "External index refreshes every 30 seconds.",
+            },
+            "stream_supported": False,
+            "data_source": index_config["provider"],
+            "display_only_index": True,
+            "candles": candles,
+            "levels": {},
+            "support_resistance": {"support": [], "resistance": [], "meta": {"reason": "display_only_index"}},
+            "structure_reactions": {"support_watch": [], "resistance_watch": [], "meta": {"reason": "display_only_index"}},
+            "supply_demand": {"demand": [], "supply": [], "meta": {"reason": "display_only_index"}},
+            "fair_value_gaps": {"bullish": [], "bearish": [], "all": [], "meta": {"reason": "display_only_index", "read_only": True}},
+            "liquidity_sweeps": {"upside": [], "downside": [], "status": "DISPLAY_ONLY"},
+            "level_clusters": {"clusters": [], "note": "Display-only index context."},
+            "confirmation_setups": {"status": "NO_SETUP", "best_grade": "NO_TRADE", "setups": [], "meta": {"read_only": True, "reason": "display_only_index"}},
+            "professional_context": {"professional_grade": "NO_TRADE", "warnings": [source_warning], "read_only": True},
+            "setup_logging": {"logged_setups": 0, "outcomes_evaluated": 0, "read_only": True},
+            "indicators": indicators,
+            "chart_session": {"date": now.date().isoformat(), "is_historical": False, "label": "EXTERNAL INDEX", "reason": source_warning, "read_only": True},
+            "data_quality_status": "WARNING",
+            "candle_accuracy_mode": "EXTERNAL_INDEX_1MIN",
+            "raw_candle_count": integrity["raw_candle_count"],
+            "validated_candle_count": integrity["validated_candle_count"],
+            "suspicious_candle_count": integrity["suspicious_candle_count"],
+            "rejected_candle_count": integrity["rejected_candle_count"],
+            "corrected_candle_count": integrity["corrected_candle_count"],
+            "candle_data_warnings": list(dict.fromkeys([source_warning, *integrity["candle_data_warnings"]])),
+            "bad_print_filter_enabled": True,
+            "chart_lines": [],
+            "chart_line_warnings": [source_warning],
+            "data_status": "ok",
+            "errors": [],
+        })
+    except Exception as error:
+        return jsonify({
+            "symbol": symbol,
+            "active_symbol": symbol,
+            "read_only": True,
+            "timeframe": timeframe,
+            "candles": [],
+            "stream_supported": False,
+            "display_only_index": True,
+            "data_status": "error",
+            "errors": [f"Unable to load {symbol} external index data: {error}"],
+        }), 502
+
+
 @APP.route("/api/chart")
 def generic_chart_data():
     raw_symbol = request.args.get("symbol", SYMBOL)
     if not str(raw_symbol).strip():
         return jsonify({"data_status": "error", "errors": ["Symbol is required."], "read_only": True}), 400
+    try:
+        active_symbol = normalize_symbol(raw_symbol)
+    except ValueError as error:
+        return jsonify({"data_status": "error", "errors": [str(error)], "read_only": True}), 400
+    timeframe = request.args.get("timeframe", "1Min")
+    if active_symbol in EXTERNAL_INDEX_SYMBOLS:
+        return external_index_chart_data(active_symbol, timeframe if timeframe in TIMEFRAMES else "1Min")
     return chart_data(symbol_override=raw_symbol)
 
 

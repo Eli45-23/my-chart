@@ -1,5 +1,6 @@
 import unittest
 from datetime import date, datetime
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import indicators
@@ -102,6 +103,32 @@ class CoreLogicTests(unittest.TestCase):
         self.assertTrue(review["not_financial_advice"])
         self.assertTrue(review["not_an_order"])
         self.assertIn("Not an order", review["summary"])
+
+    @patch("server_stream.fetch_external_index_bars")
+    def test_spx_uses_display_only_external_index_payload(self, fetch_external_index_bars):
+        start = 1_782_221_400
+        fetch_external_index_bars.return_value = [
+            {
+                "t": datetime.fromtimestamp(start + minute * 60, tz=ET).astimezone(ZoneInfo("UTC")).isoformat().replace("+00:00", "Z"),
+                "o": 7300 + minute,
+                "h": 7301 + minute,
+                "l": 7299 + minute,
+                "c": 7300.5 + minute,
+                "v": 0,
+            }
+            for minute in range(12)
+        ]
+        with server_stream.APP.app_context():
+            response = server_stream.external_index_chart_data("SPX", "5Min")
+        payload = response.get_json()
+
+        self.assertEqual(payload["data_status"], "ok")
+        self.assertEqual(payload["symbol"], "SPX")
+        self.assertTrue(payload["display_only_index"])
+        self.assertFalse(payload["stream_supported"])
+        self.assertEqual(payload["data_source"], "Yahoo Finance index feed")
+        self.assertTrue(payload["candles"])
+        self.assertEqual(payload["confirmation_setups"]["status"], "NO_SETUP")
 
 
 if __name__ == "__main__":

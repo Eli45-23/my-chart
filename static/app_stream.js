@@ -206,7 +206,10 @@ function marketGridOpen() {
 }
 
 function disposeMarketGridCharts() {
-  marketGridCharts.forEach(card => card.chart.remove());
+  marketGridCharts.forEach(card => {
+    card.eventSource?.close();
+    card.chart.remove();
+  });
   marketGridCharts.clear();
 }
 
@@ -258,7 +261,7 @@ function createMarketGridChart(index) {
   });
   const vwap = miniChart.addLineSeries({ color: "#d2aa53", lineWidth: 1, priceLineVisible: false, title: "VWAP" });
   const ema9 = miniChart.addLineSeries({ color: "#5f91c1", lineWidth: 1, priceLineVisible: false, title: "EMA9" });
-  marketGridCharts.set(index, { chart: miniChart, candles, vwap, ema9, host });
+  marketGridCharts.set(index, { chart: miniChart, candles, vwap, ema9, host, eventSource: null, streamKey: null, quality: null });
 }
 
 function resizeMarketGridCharts() {
@@ -292,10 +295,73 @@ function updateMarketGridCard(index, data, errorMessage = "") {
   price.textContent = Number.isFinite(current) ? current.toFixed(2) : "--";
   status.textContent = `${data?.data_quality_status || "DEGRADED"} · ${candles.length} candles · ${marketGridLayout[index].timeframe.replace("Min", "m")}`;
   status.classList.toggle("market-grid-error", data?.data_quality_status === "DEGRADED");
+  card.quality = data?.data_quality_status || "DEGRADED";
+}
+
+function closeMarketGridCardStream(card) {
+  card?.eventSource?.close();
+  if (card) {
+    card.eventSource = null;
+    card.streamKey = null;
+  }
+}
+
+function updateMarketGridLiveStatus(index, message, error = false) {
+  const status = marketGridCardsEl?.querySelector(`[data-market-grid-status="${index}"]`);
+  if (!status) return;
+  status.textContent = message;
+  status.classList.toggle("market-grid-error", error);
+}
+
+function connectMarketGridCardStream(index, requested) {
+  const card = marketGridCharts.get(index);
+  if (!card) return;
+  const streamKey = `${requested.symbol}:${requested.timeframe}`;
+  if (card.eventSource && card.streamKey === streamKey) return;
+  closeMarketGridCardStream(card);
+
+  const source = new EventSource(`/api/stream?symbol=${encodeURIComponent(requested.symbol)}&timeframe=${encodeURIComponent(requested.timeframe)}`);
+  card.eventSource = source;
+  card.streamKey = streamKey;
+
+  source.onopen = () => {
+    if (marketGridCharts.get(index)?.eventSource !== source) return;
+    updateMarketGridLiveStatus(index, `${card.quality || "VALIDATED"} · LIVE ${requested.timeframe.replace("Min", "m")}`);
+  };
+  source.onmessage = event => {
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch (_) {
+      return;
+    }
+    const current = marketGridLayout[index];
+    if (!current || current.symbol !== requested.symbol || current.timeframe !== requested.timeframe || marketGridCharts.get(index)?.eventSource !== source) return;
+    const price = marketGridCardsEl?.querySelector(`[data-market-grid-price="${index}"]`);
+    if (data.type === "live_candle" && data.candle) {
+      card.candles.update(data.candle);
+      const latest = Number(data.latest_trade?.price ?? data.candle.close);
+      if (price && Number.isFinite(latest)) price.textContent = latest.toFixed(2);
+      updateMarketGridLiveStatus(index, `${card.quality || "VALIDATED"} · LIVE ${requested.timeframe.replace("Min", "m")}`);
+    } else if (data.type === "heartbeat") {
+      const latest = Number(data.latest_trade?.price);
+      if (price && Number.isFinite(latest)) price.textContent = latest.toFixed(2);
+    } else if (data.type === "data_quality_warning") {
+      card.quality = data.data_quality_status || "WARNING";
+      updateMarketGridLiveStatus(index, `${card.quality} · live candle withheld`, card.quality === "DEGRADED");
+    }
+  };
+  source.onerror = () => {
+    if (marketGridCharts.get(index)?.eventSource === source) {
+      updateMarketGridLiveStatus(index, `${requested.symbol} stream reconnecting...`);
+    }
+  };
 }
 
 async function loadMarketGridCard(index) {
   const requested = { ...marketGridLayout[index] };
+  const card = marketGridCharts.get(index);
+  if (card?.streamKey && card.streamKey !== `${requested.symbol}:${requested.timeframe}`) closeMarketGridCardStream(card);
   const status = marketGridCardsEl?.querySelector(`[data-market-grid-status="${index}"]`);
   if (status) {
     status.textContent = `Loading ${requested.symbol}...`;
@@ -310,6 +376,12 @@ async function loadMarketGridCard(index) {
       throw new Error((data.errors || ["No chart data available."]).join(", "));
     }
     updateMarketGridCard(index, data);
+    if (data.stream_supported === false) {
+      closeMarketGridCardStream(marketGridCharts.get(index));
+      updateMarketGridLiveStatus(index, `${data.data_source || "External index"} · refreshes every 30s`);
+      return;
+    }
+    connectMarketGridCardStream(index, requested);
   } catch (error) {
     updateMarketGridCard(index, null, error.message || "Chart unavailable.");
   }
@@ -346,6 +418,7 @@ function renderMarketGrid() {
         symbolInputEl.value = marketGridLayout[index].symbol;
         return;
       }
+      closeMarketGridCardStream(marketGridCharts.get(index));
       marketGridLayout[index].symbol = symbol;
       symbolInputEl.value = symbol;
       saveMarketGridLayout();
@@ -357,6 +430,7 @@ function renderMarketGrid() {
     });
     loadButton.addEventListener("click", applySymbol);
     timeframeInput.addEventListener("change", () => {
+      closeMarketGridCardStream(marketGridCharts.get(index));
       marketGridLayout[index].timeframe = timeframeInput.value;
       saveMarketGridLayout();
       loadMarketGridCard(index);
@@ -2005,6 +2079,14 @@ async function loadInitialChart() {
 function connectStream() {
   if (eventSource) {
     eventSource.close();
+  }
+
+  if (latestPayload?.stream_supported === false) {
+    eventSource = null;
+    streamStatusEl.textContent = `${activeSymbol} external index refreshes every 30s`;
+    streamStatusEl.classList.remove("connected");
+    streamStatusEl.classList.add("reconnecting");
+    return;
   }
 
   const streamSymbol = activeSymbol;

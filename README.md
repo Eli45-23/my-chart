@@ -231,6 +231,8 @@ Use **Market Grid** in the chart header to open a full-screen four-chart workspa
 
 Each card displays validated candles with VWAP and EMA9 using the existing `/api/chart` route. Grid preferences are saved only in browser `localStorage`; the grid is read-only and a card can be opened in the full detailed chart with **Focus**.
 
+`SPX` is supported as a display-only S&P 500 index chart using the `^GSPC` external index feed because standard Alpaca stock bars do not include the index. It refreshes every 30 seconds, is clearly labeled as an external source, and does not enable live Alpaca streaming, AI review, setup logging, or entry markers.
+
 ### Candle Accuracy
 
 Candle quality is a major part of the project.
